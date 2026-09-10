@@ -346,8 +346,8 @@ async function uploadIcon(browserId, tabId, iconPath) {
     const existingUrl = await waitIconUrl(browserId, tabId);
     if (existingUrl) return existingUrl;
   }
-  const custom = findInteractive(snapshot, ["自定义"], { partial: true });
-  if (custom) await clickLabel(browserId, tabId, snapshot, ["自定义"], { partial: true });
+  const custom = findInteractive(snapshot, ["自定义"]);
+  if (custom) await clickLabel(browserId, tabId, snapshot, ["自定义"]);
   snapshot = await waitSnapshot(browserId, tabId, (value) => /点击上传图片/.test(snapshotText(value)));
   await clickLabel(browserId, tabId, snapshot, ["点击上传图片"], { partial: true });
   const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|上传图片/.test(snapshotText(value)));
