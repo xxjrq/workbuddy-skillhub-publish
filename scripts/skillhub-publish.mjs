@@ -11,7 +11,7 @@ const SKILLHUB_URL = process.env.SKILLHUB_PUBLISH_URL || "https://skillhub.cn/da
 const DEFAULT_CHANGELOG = "首个公开版本：完善 SkillHub 发布流程，支持 Easy WebBridge 浏览器自动化。";
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
-  ".git/*", ".factory/*", "dist/*", "node_modules/*", ".gitignore", ".DS_Store",
+  ".git/*", ".factory/*", "dist/*", "node_modules/*", ".gitignore", ".DS_Store", "LICENSE",
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
 ];
 
@@ -205,7 +205,10 @@ async function packageSkill(inputDir, validation = null) {
   const listed = await runProcess("unzip", ["-Z1", zipPath]);
   if (listed.code !== 0) fail("package-failed", `无法读取 zip 内容：${listed.stderr.trim()}`);
   const entries = listed.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-  for (const required of [...REQUIRED_FILES, checked.iconRelative]) {
+  // SkillHub currently rejects LICENSE as an uploaded archive entry. The
+  // repository still requires and validates it, but the platform package
+  // deliberately omits it.
+  for (const required of ["SKILL.md", "manifest.yaml", checked.iconRelative]) {
     if (!entries.includes(required)) fail("package-failed", `zip 缺少 ${required}`);
   }
   const digest = createHash("sha256").update(await readFile(zipPath)).digest("hex");

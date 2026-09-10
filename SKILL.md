@@ -35,7 +35,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 ## 标准流程
 
 1. `validate` 检查清单、版本、图标和尺寸。
-2. `package` 使用 Git 归档（或系统 `zip`）生成 `dist/<slug>-<version>.zip`，排除 `.git`、`.factory`、旧 `dist` 和 `.gitignore`，保留 `LICENSE`。
+2. `package` 使用系统 `zip` 生成 `dist/<slug>-<version>.zip`，排除 `.git`、`.factory`、旧 `dist`、`.gitignore` 和 SkillHub 当前拒绝的 `LICENSE`；本地仓库仍必须保留并校验 `LICENSE`。
 3. `preflight` 列出在线浏览器；发布时锁定一个明确 `browserId`。
 4. 复用已登录 SkillHub 标签，进入“发布 Skill · 最快上架”。
 5. 上传 ZIP 和 512px 图标，填写 slug、显示名称、中文简介、版本和更新说明。
