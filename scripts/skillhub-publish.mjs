@@ -279,7 +279,7 @@ async function clickLabel(browserId, tabId, snapshot, labels, options = {}) {
 }
 
 async function trustedClickLabel(browserId, tabId, label) {
-  const code = `(() => { const label = ${JSON.stringify(label)}; const element = [...document.querySelectorAll("button,[role=tab]")].find((item) => (item.textContent || "").trim() === label); if (!element) return null; const rect = element.getBoundingClientRect(); return JSON.stringify({x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}); })()`;
+  const code = `(() => { const label = ${JSON.stringify(label)}; const element = [...document.querySelectorAll("button,[role=tab]")].find((item) => (item.textContent || "").trim() === label); if (!element) return null; element.scrollIntoView({ block: "center", inline: "center" }); const rect = element.getBoundingClientRect(); return JSON.stringify({x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}); })()`;
   const value = await evaluate(browserId, tabId, code);
   if (typeof value !== "string" || !value) fail("needs-user-action", `页面未找到可点击的按钮：${label}`);
   const point = JSON.parse(value);
