@@ -279,7 +279,17 @@ async function clickLabel(browserId, tabId, snapshot, labels, options = {}) {
 }
 
 async function takeSnapshot(browserId, tabId) {
-  return bridgeCommand(browserId, "snapshot", { tabId, maxTextLength: 24_000 });
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      return await bridgeCommand(browserId, "snapshot", { tabId, maxTextLength: 24_000 });
+    } catch (error) {
+      lastError = error;
+      if (!/frame with id .* removed|no such frame|target closed/i.test(String(error?.message || error))) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 500 + attempt * 250));
+    }
+  }
+  throw lastError || new Error("SkillHub 页面快照失败");
 }
 
 async function waitSnapshot(browserId, tabId, predicate, timeoutMs = 20_000) {
