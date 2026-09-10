@@ -369,8 +369,8 @@ async function uploadIcon(browserId, tabId, iconPath) {
   const custom = findInteractive(snapshot, ["自定义"]);
   if (custom) await trustedClickLabel(browserId, tabId, "自定义");
   snapshot = await waitSnapshot(browserId, tabId, (value) => /点击上传图片/.test(snapshotText(value)));
-  await clickLabel(browserId, tabId, snapshot, ["点击上传图片"], { partial: true });
-  const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|上传图片/.test(snapshotText(value)));
+  await trustedClickLabel(browserId, tabId, "点击上传图片");
+  const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|点击选择图片/.test(snapshotText(value)));
   if (!dialog || !/上传/.test(snapshotText(dialog))) fail("needs-user-action", "图标上传窗口未打开");
   const imageSelector = 'input[type="file"][accept*="image"]';
   await waitForFileInput(browserId, tabId, imageSelector);
