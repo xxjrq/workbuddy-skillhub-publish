@@ -500,7 +500,8 @@ async function selfTest() {
     const packaged = await packageSkill(dir, checked);
     const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry === ".gitignore" || entry === ".env");
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
-    print({ ok: true, status: "passed", tests: ["manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files"], zipBytes: packaged.zipBytes });
+    if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
+    print({ ok: true, status: "passed", tests: ["manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
