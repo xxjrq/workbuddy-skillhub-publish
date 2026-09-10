@@ -330,6 +330,22 @@ async function waitForFileInput(browserId, tabId, selector, timeoutMs = 15_000) 
   fail("needs-user-action", `页面未生成文件选择框：${selector}`);
 }
 
+async function verifyPublishFields(browserId, tabId, fields) {
+  const labels = {
+    "#skill-slug": "Slug",
+    "#skill-displayName": "Skill 名称",
+    "#skill-summaryZh": "Skill 描述",
+    "#skill-version": "版本号",
+    "#skill-changelog": "变更说明",
+  };
+  for (const [selector, expected] of fields) {
+    const actual = await evaluate(browserId, tabId, `(() => { const element = document.querySelector(${JSON.stringify(selector)}); return element && "value" in element ? String(element.value || "") : null; })()`);
+    if (typeof actual !== "string" || actual.trim() !== String(expected).trim()) {
+      fail("needs-user-action", `SkillHub ${labels[selector] || selector} 未成功写入，请检查表单后重试`);
+    }
+  }
+}
+
 async function findOrOpenSkillhubTab(browserId) {
   const tabs = await bridgeCommand(browserId, "list_tabs", {});
   const existing = Array.isArray(tabs)
@@ -419,6 +435,7 @@ async function publishSkill(inputDir, flags) {
       ["#skill-changelog", changelog],
     ];
     for (const [selector, value] of fields) await bridgeCommand(browserId, "fill", { selector, value, tabId: opened.tabId });
+    await verifyPublishFields(browserId, opened.tabId, fields);
     const iconUrl = await uploadIcon(browserId, opened.tabId, packaged.iconPath);
     snapshot = await takeSnapshot(browserId, opened.tabId);
     const result = {

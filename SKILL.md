@@ -59,6 +59,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 - 同一浏览器的操作串行执行；任务结束只关闭本 Skill 创建的标签组，不关闭用户原有标签。
 
 字段选择器和 SkillHub 页面变化记录在 [references/skillhub-form.md](references/skillhub-form.md)。
+遇到登录、表单、图标、文件类型、重复提交或审核状态问题时，先读 [references/troubleshooting.md](references/troubleshooting.md)，按现象处理，不要重复盲点页面。
 
 ## 自测
 
