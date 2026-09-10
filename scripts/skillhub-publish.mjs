@@ -317,6 +317,16 @@ async function evaluate(browserId, tabId, code) {
   return bridgeCommand(browserId, "evaluate", { tabId, code });
 }
 
+async function waitForFileInput(browserId, tabId, selector, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const present = await evaluate(browserId, tabId, `Boolean(document.querySelector(${JSON.stringify(selector)}))`).catch(() => false);
+    if (present === true) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+  } while (Date.now() < deadline);
+  fail("needs-user-action", `页面未生成文件选择框：${selector}`);
+}
+
 async function findOrOpenSkillhubTab(browserId) {
   const tabs = await bridgeCommand(browserId, "list_tabs", {});
   const existing = Array.isArray(tabs)
@@ -362,7 +372,9 @@ async function uploadIcon(browserId, tabId, iconPath) {
   await clickLabel(browserId, tabId, snapshot, ["点击上传图片"], { partial: true });
   const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|上传图片/.test(snapshotText(value)));
   if (!dialog || !/上传/.test(snapshotText(dialog))) fail("needs-user-action", "图标上传窗口未打开");
-  await bridgeCommand(browserId, "upload", { selector: 'input[type="file"][accept*="image"]', files: [iconPath], tabId }, 60_000);
+  const imageSelector = 'input[type="file"][accept*="image"]';
+  await waitForFileInput(browserId, tabId, imageSelector);
+  await bridgeCommand(browserId, "upload", { selector: imageSelector, files: [iconPath], tabId }, 60_000);
   const cropReady = await waitSnapshot(browserId, tabId, (value) => Boolean(findInteractive(value, ["上传"])), 20_000);
   if (!cropReady) fail("needs-user-action", "SkillHub 未完成图标读取或裁剪");
   await clickLabel(browserId, tabId, cropReady, ["上传"]);
