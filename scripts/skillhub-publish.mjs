@@ -278,6 +278,16 @@ async function clickLabel(browserId, tabId, snapshot, labels, options = {}) {
   await bridgeCommand(browserId, "click", { selector: element.ref, tabId });
 }
 
+async function trustedClickLabel(browserId, tabId, label) {
+  const code = `(() => { const label = ${JSON.stringify(label)}; const element = [...document.querySelectorAll("button,[role=tab]")].find((item) => (item.textContent || "").trim() === label); if (!element) return null; const rect = element.getBoundingClientRect(); return JSON.stringify({x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}); })()`;
+  const value = await evaluate(browserId, tabId, code);
+  if (typeof value !== "string" || !value) fail("needs-user-action", `页面未找到可点击的按钮：${label}`);
+  const point = JSON.parse(value);
+  for (const type of ["mousePressed", "mouseReleased"]) {
+    await bridgeCommand(browserId, "cdp", { tabId, method: "Input.dispatchMouseEvent", params: { type, x: point.x, y: point.y, button: "left", clickCount: 1 } });
+  }
+}
+
 async function takeSnapshot(browserId, tabId) {
   let lastError = null;
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -347,7 +357,7 @@ async function uploadIcon(browserId, tabId, iconPath) {
     if (existingUrl) return existingUrl;
   }
   const custom = findInteractive(snapshot, ["自定义"]);
-  if (custom) await clickLabel(browserId, tabId, snapshot, ["自定义"]);
+  if (custom) await trustedClickLabel(browserId, tabId, "自定义");
   snapshot = await waitSnapshot(browserId, tabId, (value) => /点击上传图片/.test(snapshotText(value)));
   await clickLabel(browserId, tabId, snapshot, ["点击上传图片"], { partial: true });
   const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|上传图片/.test(snapshotText(value)));
