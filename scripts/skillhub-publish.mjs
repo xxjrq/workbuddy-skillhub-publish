@@ -457,8 +457,13 @@ async function publishSkill(inputDir, flags) {
       return;
     }
     await clickLabel(browserId, opened.tabId, snapshot, ["提交审核"], { partial: true });
-    const after = await waitSnapshot(browserId, opened.tabId, (value) => /待审核|审核中|提交成功|提交失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
-    const confirmation = snapshotText(after).replaceAll("图标审核中", "");
+    let after = await waitSnapshot(browserId, opened.tabId, (value) => /确认发布|待审核|审核中|提交成功|提交失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
+    let confirmation = snapshotText(after).replaceAll("图标审核中", "");
+    if (/确认发布/.test(confirmation) && /同名 slug|命名空间/.test(confirmation)) {
+      await clickLabel(browserId, opened.tabId, after, ["确认发布"]);
+      after = await waitSnapshot(browserId, opened.tabId, (value) => /待审核|审核中|提交成功|提交失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
+      confirmation = snapshotText(after).replaceAll("图标审核中", "");
+    }
     if (/需要完成实名认证/.test(confirmation)) fail("needs-user-action", "SkillHub 要求完成实名认证，请先完成认证");
     if (/提交失败|不允许的文件类型/i.test(confirmation)) fail("needs-user-action", "SkillHub 返回提交失败，请检查页面提示");
     if (!/待审核|审核中|提交成功|under review|pending review/i.test(confirmation)) fail("uncertain", "已点击提交，但页面没有出现 SkillHub 确认文案");
