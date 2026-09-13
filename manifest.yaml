@@ -1,7 +1,7 @@
 name: workbuddy-skillhub-publish
 display_name: "workbuddy SkillHub skill 自动发布"
 slug: workbuddy-skillhub-publish
-version: "1.0.4"
+version: "1.0.5"
 category: "publishing"
 author: "xxjrq"
 repository: "https://github.com/xxjrq/workbuddy-skillhub-publish"

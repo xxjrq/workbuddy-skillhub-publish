@@ -350,7 +350,7 @@ async function verifyPublishFields(browserId, tabId, fields) {
 async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
   const tabs = await bridgeCommand(browserId, "list_tabs", {});
   const existing = Array.isArray(tabs)
-    ? tabs.find((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:\/|$)/i.test(String(tab.url || "")))
+    ? tabs.find((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:[/?#]|$)/i.test(String(tab.url || "")))
     : null;
   if (existing?.id !== undefined) {
     const tabId = Number(existing.id);
@@ -368,15 +368,17 @@ async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
 async function ensureUpdateForm(browserId, tabId, slug) {
   for (let page = 1; page <= 20; page += 1) {
     await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: `${SKILLHUB_DASHBOARD_URL}?page=${page}` } });
+    const pageIndicator = new RegExp(`\\b${page}\\s*\\/\\s*\\d+\\b`);
     const snapshot = await waitSnapshot(browserId, tabId, (value) => {
       const text = snapshotText(value);
       return /请先登录|立即登录|login|sign in/i.test(text)
-        || (/管理你发布的所有团队 Skills/.test(text) && (/slug:/.test(text) || /暂无已发布|暂无 Skill/.test(text)));
+        || (/管理你发布的所有团队 Skills/.test(text) && pageIndicator.test(text) && (/slug:/.test(text) || /暂无已发布|暂无 Skill/.test(text)));
     });
     const text = snapshotText(snapshot);
     if (/请先登录|立即登录|login|sign in/i.test(text) && !/退出登录|logout/i.test(text)) {
       fail("needs-user-action", "SkillHub 页面要求登录，请先在指定 EasyBR 环境登录");
     }
+    if (!pageIndicator.test(text)) fail("needs-user-action", `SkillHub 第 ${page} 页加载超时，停止更新以免点错条目`);
     const code = `(() => { const expected = ${JSON.stringify(`slug: ${slug}`)}; const slugNode = [...document.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === expected); const card = slugNode?.closest('a'); const update = card && [...card.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === '更新'); if (!update) return null; update.scrollIntoView({ block: 'center', inline: 'center' }); const rect = update.getBoundingClientRect(); return JSON.stringify({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }); })()`;
     const pointText = await evaluate(browserId, tabId, code);
     if (typeof pointText === "string" && pointText) {
