@@ -349,16 +349,21 @@ async function verifyPublishFields(browserId, tabId, fields) {
 
 async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
   const tabs = await bridgeCommand(browserId, "list_tabs", {});
-  const existing = Array.isArray(tabs)
+  const candidates = Array.isArray(tabs)
     ? tabs
         .filter((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:[/?#]|$)/i.test(String(tab.url || "")))
-        .sort((left, right) => Number(right.id) - Number(left.id))[0]
-    : null;
-  if (existing?.id !== undefined) {
-    const tabId = Number(existing.id);
-    await bridgeCommand(browserId, "activate_tab", { tabId });
-    await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: targetUrl } });
-    return { tabId, created: false };
+        .sort((left, right) => Number(Boolean(right.active)) - Number(Boolean(left.active)) || Number(right.id) - Number(left.id))
+    : [];
+  for (const candidate of candidates) {
+    const tabId = Number(candidate.id);
+    try {
+      await bridgeCommand(browserId, "snapshot", { tabId, maxTextLength: 500 }, 5_000);
+      await bridgeCommand(browserId, "activate_tab", { tabId });
+      await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: targetUrl } }, 10_000);
+      return { tabId, created: false };
+    } catch {
+      // A stale tab must not block the whole batch. Try the next logged-in tab.
+    }
   }
   const session = `workbuddy-skillhub-${Date.now()}`;
   const opened = await bridgeCommand(browserId, "navigate", { url: targetUrl, newTab: true, active: true, session, groupTitle: "workbuddy SkillHub" });
