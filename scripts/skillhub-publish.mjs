@@ -13,7 +13,7 @@ const DEFAULT_CHANGELOG = "首个公开版本：完善 SkillHub 发布流程，�
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
   ".git/*", ".factory/*", "dist/*", "node_modules/*", ".gitignore", ".DS_Store", "LICENSE",
-  ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+  ".env", ".env.*", ".keep", "*/.keep", "*/__pycache__/*", "*.pyc", "*.pem", "*.key", "*.p12", "*.pfx",
 ];
 
 function fail(code, message, details = {}) {
@@ -496,7 +496,7 @@ async function publishSkill(inputDir, flags) {
       print(result);
       return;
     }
-    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"], { partial: true });
+    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"]);
     let after = await waitSnapshot(browserId, opened.tabId, (value) => /确认发布|待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
     let confirmation = snapshotText(after).replaceAll("图标审核中", "");
     if (/确认发布/.test(confirmation) && /同名 slug|命名空间/.test(confirmation)) {
@@ -558,12 +558,13 @@ async function selfTest() {
   await writeFile(join(dir, "assets", "icon-512.png"), png);
   await writeFile(join(dir, ".gitignore"), "dist/\n");
   await writeFile(join(dir, ".env"), "SHOULD_NOT_BE_PACKAGED=1\n");
+  await writeFile(join(dir, "assets", ".keep"), "");
   await writeFile(join(dir, ".factory", "progress.json"), "{}\n");
   await writeFile(join(dir, "dist", "old.zip"), "old\n");
   try {
     const checked = await validateSkill(dir);
     const packaged = await packageSkill(dir, checked);
-    const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry === ".gitignore" || entry === ".env");
+    const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
     print({ ok: true, status: "passed", tests: ["manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
