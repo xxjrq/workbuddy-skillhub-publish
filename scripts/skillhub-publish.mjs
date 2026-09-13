@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 
 const BRIDGE_URL = (process.env.EASY_WEBBRIDGE_URL || "http://127.0.0.1:17777").replace(/\/$/, "");
 const SKILLHUB_URL = process.env.SKILLHUB_PUBLISH_URL || "https://skillhub.cn/dashboard/publish";
+const SKILLHUB_DASHBOARD_URL = "https://skillhub.cn/dashboard";
 const DEFAULT_CHANGELOG = "首个公开版本：完善 SkillHub 发布流程，支持 Easy WebBridge 浏览器自动化。";
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
@@ -37,7 +38,7 @@ function parseArgs(argv) {
       continue;
     }
     const key = item.slice(2).replaceAll("-", "_");
-    if (["submit", "close_tab"].includes(key)) {
+    if (["submit", "close_tab", "update"].includes(key)) {
       flags[key] = true;
       continue;
     }
@@ -50,7 +51,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  process.stdout.write(`workbuddy SkillHub skill 自动发布\n\n用法：\n  node scripts/skillhub-publish.mjs validate <skill-dir>\n  node scripts/skillhub-publish.mjs plan <skill-dir>\n  node scripts/skillhub-publish.mjs package <skill-dir>\n  node scripts/skillhub-publish.mjs preflight\n  node scripts/skillhub-publish.mjs publish <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs publish <skill-dir> --display-name <name> [--submit] [--close-tab]\n  node scripts/skillhub-publish.mjs self-test\n\npublish 默认上传并填写，停在“提交审核”前；只有显式 --submit 才提交。\n`);
+  process.stdout.write(`workbuddy SkillHub skill 自动发布\n\n用法：\n  node scripts/skillhub-publish.mjs validate <skill-dir>\n  node scripts/skillhub-publish.mjs plan <skill-dir>\n  node scripts/skillhub-publish.mjs package <skill-dir>\n  node scripts/skillhub-publish.mjs preflight\n  node scripts/skillhub-publish.mjs publish <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs publish <skill-dir> --display-name <name> [--update] [--submit] [--close-tab]\n  node scripts/skillhub-publish.mjs self-test\n\npublish 默认上传并填写，停在提交前；更新已有条目时加 --update，只有显式 --submit 才提交。\n`);
 }
 
 function scalar(value) {
@@ -346,7 +347,7 @@ async function verifyPublishFields(browserId, tabId, fields) {
   }
 }
 
-async function findOrOpenSkillhubTab(browserId) {
+async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
   const tabs = await bridgeCommand(browserId, "list_tabs", {});
   const existing = Array.isArray(tabs)
     ? tabs.find((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:\/|$)/i.test(String(tab.url || "")))
@@ -354,14 +355,43 @@ async function findOrOpenSkillhubTab(browserId) {
   if (existing?.id !== undefined) {
     const tabId = Number(existing.id);
     await bridgeCommand(browserId, "activate_tab", { tabId });
-    await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: SKILLHUB_URL } });
+    await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: targetUrl } });
     return { tabId, created: false };
   }
   const session = `workbuddy-skillhub-${Date.now()}`;
-  const opened = await bridgeCommand(browserId, "navigate", { url: SKILLHUB_URL, newTab: true, active: true, session, groupTitle: "workbuddy SkillHub" });
+  const opened = await bridgeCommand(browserId, "navigate", { url: targetUrl, newTab: true, active: true, session, groupTitle: "workbuddy SkillHub" });
   const tabId = Number(opened.tabId ?? opened.id);
   if (!Number.isInteger(tabId)) fail("bridge-error", "Easy WebBridge 没有返回新标签页 ID");
   return { tabId, created: true, session };
+}
+
+async function ensureUpdateForm(browserId, tabId, slug) {
+  for (let page = 1; page <= 20; page += 1) {
+    await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: `${SKILLHUB_DASHBOARD_URL}?page=${page}` } });
+    const snapshot = await waitSnapshot(browserId, tabId, (value) => {
+      const text = snapshotText(value);
+      return /请先登录|立即登录|login|sign in/i.test(text)
+        || (/管理你发布的所有团队 Skills/.test(text) && (/slug:/.test(text) || /暂无已发布|暂无 Skill/.test(text)));
+    });
+    const text = snapshotText(snapshot);
+    if (/请先登录|立即登录|login|sign in/i.test(text) && !/退出登录|logout/i.test(text)) {
+      fail("needs-user-action", "SkillHub 页面要求登录，请先在指定 EasyBR 环境登录");
+    }
+    const code = `(() => { const expected = ${JSON.stringify(`slug: ${slug}`)}; const slugNode = [...document.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === expected); const card = slugNode?.closest('a'); const update = card && [...card.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === '更新'); if (!update) return null; update.scrollIntoView({ block: 'center', inline: 'center' }); const rect = update.getBoundingClientRect(); return JSON.stringify({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }); })()`;
+    const pointText = await evaluate(browserId, tabId, code);
+    if (typeof pointText === "string" && pointText) {
+      const point = JSON.parse(pointText);
+      for (const type of ["mousePressed", "mouseReleased"]) {
+        await bridgeCommand(browserId, "cdp", { tabId, method: "Input.dispatchMouseEvent", params: { type, x: point.x, y: point.y, button: "left", clickCount: 1 } });
+      }
+      const form = await waitSnapshot(browserId, tabId, (value) => /更新 Skill/.test(snapshotText(value)) && /上传新版本文件/.test(snapshotText(value)));
+      if (/更新 Skill/.test(snapshotText(form))) return form;
+      fail("needs-user-action", `已找到 ${slug}，但更新表单没有打开`);
+    }
+    const hasNext = await evaluate(browserId, tabId, `(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim() === '下一页'); return Boolean(button && !button.disabled); })()`);
+    if (hasNext !== true) break;
+  }
+  fail("needs-user-action", `“我的 Skills”中未找到 ${slug}，不能使用 --update`);
 }
 
 async function ensurePublishForm(browserId, tabId) {
@@ -378,17 +408,19 @@ async function ensurePublishForm(browserId, tabId) {
   return snapshot;
 }
 
-async function uploadIcon(browserId, tabId, iconPath) {
+async function uploadIcon(browserId, tabId, iconPath, { replace = false } = {}) {
   let snapshot = await takeSnapshot(browserId, tabId);
   const currentText = snapshotText(snapshot);
-  if (/已上传 Skill 图标|已选图标|图标审核中/.test(currentText)) {
+  const previousUrl = replace ? await waitIconUrl(browserId, tabId, "", 2_000) : null;
+  if (!replace && /已上传 Skill 图标|已选图标|图标审核中/.test(currentText)) {
     const existingUrl = await waitIconUrl(browserId, tabId);
     if (existingUrl) return existingUrl;
   }
   const custom = findInteractive(snapshot, ["自定义"]);
   if (custom) await trustedClickLabel(browserId, tabId, "自定义");
-  snapshot = await waitSnapshot(browserId, tabId, (value) => /点击上传图片/.test(snapshotText(value)));
-  await trustedClickLabel(browserId, tabId, "点击上传图片");
+  snapshot = await waitSnapshot(browserId, tabId, (value) => /点击上传图片|重新上传/.test(snapshotText(value)));
+  const uploadLabel = /重新上传/.test(snapshotText(snapshot)) ? "重新上传" : "点击上传图片";
+  await trustedClickLabel(browserId, tabId, uploadLabel);
   const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|点击选择图片/.test(snapshotText(value)));
   if (!dialog || !/上传/.test(snapshotText(dialog))) fail("needs-user-action", "图标上传窗口未打开");
   const imageSelector = 'input[type="file"][accept*="image"]';
@@ -399,17 +431,17 @@ async function uploadIcon(browserId, tabId, iconPath) {
   await clickLabel(browserId, tabId, cropReady, ["上传"]);
   const saved = await waitSnapshot(browserId, tabId, (value) => /重新上传|已上传 Skill 图标|已选图标|图标审核中/.test(snapshotText(value)), 30_000);
   if (!saved) fail("needs-user-action", "SkillHub 图标上传未完成");
-  const iconUrl = await waitIconUrl(browserId, tabId);
+  const iconUrl = await waitIconUrl(browserId, tabId, previousUrl || "");
   if (!iconUrl) fail("needs-user-action", "图标状态已变化，但尚未读取到 SkillHub 远程图标地址");
   return iconUrl;
 }
 
-async function waitIconUrl(browserId, tabId) {
+async function waitIconUrl(browserId, tabId, excludedUrl = "", timeoutMs = 20_000) {
   const code = `(() => { const panels = [...document.querySelectorAll('[role="tabpanel"]')].filter((panel) => panel.getClientRects().length); const image = panels.flatMap((panel) => [...panel.querySelectorAll('img')]).find((item) => { const src = item.currentSrc || item.src || ''; const alt = (item.alt || '').trim(); const text = item.closest('[role="tabpanel"]')?.textContent || ''; return item.getClientRects().length && /^https?:\\/\\//i.test(src) && (alt.includes('已上传 Skill 图标') || alt.includes('已选图标') || text.includes('重新上传') || text.includes('图标审核中')); }); return image?.currentSrc || image?.src || null; })()`;
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + timeoutMs;
   do {
     const value = await evaluate(browserId, tabId, code).catch(() => null);
-    if (typeof value === "string" && /^https?:\/\//i.test(value)) return value;
+    if (typeof value === "string" && /^https?:\/\//i.test(value) && value !== excludedUrl) return value;
     await new Promise((resolveWait) => setTimeout(resolveWait, 350));
   } while (Date.now() < deadline);
   return null;
@@ -420,23 +452,30 @@ async function publishSkill(inputDir, flags) {
   const packaged = await packageSkill(inputDir, checked);
   const runtime = await preflight();
   const browser = chooseBrowser(runtime.browsers, flags);
-  const opened = await findOrOpenSkillhubTab(browser.browserId);
+  const updateMode = Boolean(flags.update);
+  const opened = await findOrOpenSkillhubTab(browser.browserId, updateMode ? SKILLHUB_DASHBOARD_URL : SKILLHUB_URL);
   const { browserId, displayName } = browser;
   try {
-    let snapshot = await ensurePublishForm(browserId, opened.tabId);
+    let snapshot = updateMode
+      ? await ensureUpdateForm(browserId, opened.tabId, packaged.slug)
+      : await ensurePublishForm(browserId, opened.tabId);
     await bridgeCommand(browserId, "upload", { selector: 'input[type="file"][accept*=".zip"]', files: [packaged.zipPath], tabId: opened.tabId }, 60_000);
     const changelog = String(flags.changelog || DEFAULT_CHANGELOG);
     const displayNameValue = String(flags.skill_name || packaged.displayName);
     const fields = [
-      ["#skill-slug", packaged.slug],
       ["#skill-displayName", displayNameValue],
       ["#skill-summaryZh", packaged.description],
       ["#skill-version", packaged.version],
       ["#skill-changelog", changelog],
     ];
+    if (!updateMode) fields.unshift(["#skill-slug", packaged.slug]);
+    else {
+      const currentSlug = await evaluate(browserId, opened.tabId, `(() => { const element = document.querySelector('#skill-slug'); return element && 'value' in element ? String(element.value || '') : null; })()`);
+      if (currentSlug !== packaged.slug) fail("needs-user-action", `SkillHub 更新表单 slug 不一致：页面 ${currentSlug || "<空>"}，本地 ${packaged.slug}`);
+    }
     for (const [selector, value] of fields) await bridgeCommand(browserId, "fill", { selector, value, tabId: opened.tabId });
     await verifyPublishFields(browserId, opened.tabId, fields);
-    const iconUrl = await uploadIcon(browserId, opened.tabId, packaged.iconPath);
+    const iconUrl = await uploadIcon(browserId, opened.tabId, packaged.iconPath, { replace: updateMode });
     snapshot = await takeSnapshot(browserId, opened.tabId);
     const result = {
       ok: true,
@@ -450,26 +489,27 @@ async function publishSkill(inputDir, flags) {
       zip: { path: packaged.zipPath, bytes: packaged.zipBytes, sha256: packaged.sha256 },
       icon: { path: packaged.iconPath, url: iconUrl },
       fieldsFilled: fields.map(([selector]) => selector),
+      mode: updateMode ? "update" : "create",
       submitRequired: !Boolean(flags.submit),
     };
     if (!flags.submit) {
       print(result);
       return;
     }
-    await clickLabel(browserId, opened.tabId, snapshot, ["提交审核"], { partial: true });
-    let after = await waitSnapshot(browserId, opened.tabId, (value) => /确认发布|待审核|审核中|提交成功|提交失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
+    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"], { partial: true });
+    let after = await waitSnapshot(browserId, opened.tabId, (value) => /确认发布|待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
     let confirmation = snapshotText(after).replaceAll("图标审核中", "");
     if (/确认发布/.test(confirmation) && /同名 slug|命名空间/.test(confirmation)) {
       await clickLabel(browserId, opened.tabId, after, ["确认发布"]);
-      after = await waitSnapshot(browserId, opened.tabId, (value) => /待审核|审核中|提交成功|提交失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
+      after = await waitSnapshot(browserId, opened.tabId, (value) => /待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
       confirmation = snapshotText(after).replaceAll("图标审核中", "");
     }
     if (/需要完成实名认证/.test(confirmation)) fail("needs-user-action", "SkillHub 要求完成实名认证，请先完成认证");
-    if (/提交失败|不允许的文件类型/i.test(confirmation)) {
-      const detail = confirmation.split(/\r?\n/).map((line) => line.trim()).find((line) => /提交失败|不允许的文件类型/i.test(line));
-      fail("needs-user-action", `SkillHub 返回提交失败${detail ? `：${detail}` : "，请检查页面提示"}`);
+    if (/提交失败|更新失败|不允许的文件类型/i.test(confirmation)) {
+      const detail = confirmation.split(/\r?\n/).map((line) => line.trim()).find((line) => /提交失败|更新失败|不允许的文件类型/i.test(line));
+      fail("needs-user-action", `SkillHub 返回${updateMode ? "更新" : "提交"}失败${detail ? `：${detail}` : "，请检查页面提示"}`);
     }
-    if (!/待审核|审核中|提交成功|under review|pending review/i.test(confirmation)) fail("uncertain", "已点击提交，但页面没有出现 SkillHub 确认文案");
+    if (!/待审核|审核中|提交成功|更新成功|under review|pending review/i.test(confirmation)) fail("uncertain", `已点击${updateMode ? "更新" : "提交"}，但页面没有出现 SkillHub 确认文案`);
     print({ ...result, status: /待审核|审核中|under review|pending review/i.test(confirmation) ? "under_review" : "submitted", submitRequired: false });
   } finally {
     // Existing user tabs are borrowed and never closed. A newly opened tab is

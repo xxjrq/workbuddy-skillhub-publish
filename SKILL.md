@@ -26,11 +26,14 @@ node scripts/skillhub-publish.mjs package /绝对路径/skill-dir
 node scripts/skillhub-publish.mjs preflight
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --browser-id <browserId>
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --submit
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --update --submit
 ```
 
 `--display-name` 是 EasyBR 浏览器显示名；需要覆盖 SkillHub 表单里的 Skill 名称时使用 `--skill-name "表单名称"`，更新说明使用 `--changelog "本次更新内容"`。
 
 `publish` 不带 `--submit` 时只完成上传和字段填写，停在提交前；带 `--submit` 才点击“提交审核”。命令会优先复用已打开的 SkillHub Dashboard 标签，避免新标签拿不到登录态。新开的标签会保留在浏览器中，方便人工检查；不会关闭用户原有标签。
+
+更新已发布 Skill 时必须加 `--update`。脚本会在“我的 Skills”中按 slug 翻页定位原条目，进入“更新 Skill”表单后重新上传 ZIP 和图标；不要把已有 slug 当成新 Skill 再走发布表单。
 
 ## 标准流程
 

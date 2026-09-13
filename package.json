@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-skillhub-publish",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Publish local AI Skills to SkillHub through an authenticated browser",
   "type": "module",
   "private": false,
