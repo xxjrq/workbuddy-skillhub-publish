@@ -13,7 +13,7 @@ const DEFAULT_CHANGELOG = "首个公开版本：完善 SkillHub 发布流程，�
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
   ".git/*", ".factory/*", ".playwright-cli/*", "dist/*", "node_modules/*", "output/*", ".gitignore", ".DS_Store", "LICENSE",
-  ".env", ".env.*", ".keep", "*/.keep", "*/__pycache__/*", "*.pyc", "*.pem", "*.key", "*.p12", "*.pfx",
+  ".env", ".env.*", ".keep", "*/.keep", "icon-source.svg", "*/icon-source.svg", "*/__pycache__/*", "*.pyc", "*.pem", "*.key", "*.p12", "*.pfx",
 ];
 
 function fail(code, message, details = {}) {
@@ -603,6 +603,7 @@ async function selfTest() {
   await writeFile(join(dir, ".gitignore"), "dist/\n");
   await writeFile(join(dir, ".env"), "SHOULD_NOT_BE_PACKAGED=1\n");
   await writeFile(join(dir, "assets", ".keep"), "");
+  await writeFile(join(dir, "assets", "icon-source.svg"), "<svg/>\n");
   await writeFile(join(dir, ".factory", "progress.json"), "{}\n");
   await writeFile(join(dir, ".playwright-cli", "page.yml"), "debug\n");
   await writeFile(join(dir, "dist", "old.zip"), "old\n");
@@ -610,7 +611,7 @@ async function selfTest() {
   try {
     const checked = await validateSkill(dir);
     const packaged = await packageSkill(dir, checked);
-    const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry.startsWith(".playwright-cli/") || entry.startsWith("output/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
+    const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry.startsWith(".playwright-cli/") || entry.startsWith("output/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.endsWith("/icon-source.svg") || entry === "icon-source.svg" || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
     print({ ok: true, status: "passed", tests: ["manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
