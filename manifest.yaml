@@ -1,9 +1,10 @@
 name: workbuddy-skillhub-publish
 display_name: "workbuddy SkillHub skill 自动发布"
 slug: workbuddy-skillhub-publish
-version: "1.0.0"
+version: "1.0.1"
 category: "publishing"
 author: "xxjrq"
+repository: "https://github.com/xxjrq/workbuddy-skillhub-publish"
 description: "免费、免第三方 API Key，通过已登录 Easy WebBridge 浏览器快速校验、打包、上传图标、填写资料并提交 SkillHub Skill。"
 icon: "icon-512.png"
 trigger_words:
