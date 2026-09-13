@@ -13,7 +13,7 @@ description: workbuddy SkillHub skill 自动发布：通过 Easy WebBridge 复�
 - Easy WebBridge 已启动在 `http://127.0.0.1:17777`，并能列出目标浏览器。
 - 必须明确指定 `browserId` 或浏览器显示名；多个环境在线时不能猜账号。
 - SkillHub 账号必须已登录且已完成实名认证。实名状态、验证码、身份确认和最终提交失败时，停在 `needs_user_action`。
-- 发布前先展示 Skill 名称、版本、ZIP 路径、目标浏览器和将要填写的字段，得到本次明确提交意图后再执行 `--submit`。
+- 用户说“发布”或“更新”即视为本次明确提交意图：先展示 Skill 名称、版本、ZIP 路径、目标浏览器和将要填写的字段，然后自动提交并回读结果。只有用户明确说“只填写、先预览”时才使用 `--fill-only` 停在按钮前。
 
 ## 常用命令
 
@@ -25,13 +25,14 @@ node scripts/skillhub-publish.mjs plan /绝对路径/skill-dir
 node scripts/skillhub-publish.mjs package /绝对路径/skill-dir
 node scripts/skillhub-publish.mjs preflight
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --browser-id <browserId>
-node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --submit
-node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --update --submit
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体"
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --update
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --fill-only
 ```
 
 `--display-name` 是 EasyBR 浏览器显示名；需要覆盖 SkillHub 表单里的 Skill 名称时使用 `--skill-name "表单名称"`，更新说明使用 `--changelog "本次更新内容"`。
 
-`publish` 不带 `--submit` 时只完成上传和字段填写，停在提交前；带 `--submit` 才点击“提交审核”。命令会优先复用已打开的 SkillHub Dashboard 标签，避免新标签拿不到登录态。新开的标签会保留在浏览器中，方便人工检查；不会关闭用户原有标签。
+`publish` 默认完成上传、字段填写并点击“提交审核”或“更新 Skill”；只有带 `--fill-only` 才停在提交前。保留 `--submit` 仅用于兼容旧命令。命令会优先复用已打开的 SkillHub Dashboard 标签，避免新标签拿不到登录态。新开的标签会保留在浏览器中，方便人工检查；不会关闭用户原有标签。
 
 更新已发布 Skill 时必须加 `--update`。脚本会在“我的 Skills”中按 slug 翻页定位原条目，进入“更新 Skill”表单后重新上传 ZIP 和图标；不要把已有 slug 当成新 Skill 再走发布表单。
 

@@ -21,7 +21,7 @@
 | 页面只返回通用“提交失败”，文件列表含 `icon-source.svg` | 图标设计源被当成 Skill 运行文件上传 | 保留仓库源文件，但打包时排除 `icon-source.svg`；最终 PNG 图标单独上传 | 不要删除仓库中的可编辑设计源 |
 | 页面只有名称，描述为空或旧描述 | React 表单异步更新失败，或误把 SKILL.md 建议当成已填写 | 脚本填写 `#skill-summaryZh` 后回读名称、描述、版本等字段；回读不一致直接停止 | 修正表单后再提交，不要把“已上传”当成“描述已保存” |
 | 提交失败、Slug 重复、已有版本审核中 | 同一 slug 已有审核记录，或平台返回业务拒绝 | 脚本保留页面并报告 `needs_user_action`，不伪报成功 | 到“我的 Skills”查看现有记录；更新时提升版本号，重复作品改唯一 slug |
-| 已发布 Skill 在新建表单直接“提交失败” | 已有条目必须走“我的 Skills”里的更新入口 | 使用 `publish <dir> --update --submit`，脚本按 slug 翻页并打开“更新 Skill” | 本地 slug 与平台历史 slug 不同则先人工确认正确身份，不能猜 |
+| 已发布 Skill 在新建表单直接“提交失败” | 已有条目必须走“我的 Skills”里的更新入口 | 使用 `publish <dir> --update`，脚本按 slug 翻页、打开更新表单并自动提交 | 本地 slug 与平台历史 slug 不同则先人工确认正确身份，不能猜 |
 | 提交后弹出“发布到你的命名空间” | 全局 slug 已被其他作者使用，平台允许同名 Skill 放进当前账号命名空间 | 脚本核对提示包含同名 slug/命名空间后点击一次“确认发布”，再等待真实审核回执 | 若页面显示的账号命名空间不属于当前用户，停止并检查登录账号 |
 | 要求登录、实名认证、验证码或风控 | 平台账号状态或风险控制拦截 | 脚本立即停止，不绕过验证 | 在同一个 EasyBR 环境完成平台要求，再重新运行 |
 | 显示“提交成功”但列表是“安全审核中” | 提交接收和安全审核是两个状态 | 以列表/API 的 `reviewStatus=pending` 为准 | 只能说“已提交/审核中”，审核通过前不要说已公开 |
@@ -31,8 +31,8 @@
 1. `node scripts/skillhub-publish.mjs validate <skill-dir>`：确认 `SKILL.md`、`manifest.yaml`、`LICENSE`、512×512 PNG 和名称/描述存在。
 2. `node scripts/skillhub-publish.mjs package <skill-dir>`：确认 ZIP 含 `SKILL.md`、`manifest.yaml`、图标，且不含 `LICENSE`、`.env`、证书、旧 `dist`。
 3. `node scripts/skillhub-publish.mjs preflight`：确认 Easy WebBridge 在 `127.0.0.1:17777`，并选定唯一在线 `browserId`。
-4. `publish` 填写后先回读字段和图标远程 URL，再按 `--submit` 决定是否提交。
-   已发布条目改用 `publish <dir> --update`，重新上传 ZIP 和图标并回读新版本。
+4. `publish` 填写后先回读字段和图标远程 URL，然后默认点击提交；只有明确要求只填写或先预览时才加 `--fill-only`。
+   已发布条目改用 `publish <dir> --update`，重新上传 ZIP 和图标、点击“更新 Skill”并回读新版本。
 5. 提交后检查“我的 Skills”：`安全审核中`/`待审核`表示已接收，不等于审核通过；出现拒绝原因时记录原文再修复。
 
 ## 不要重复犯的错误

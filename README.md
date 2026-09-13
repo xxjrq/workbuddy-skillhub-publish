@@ -15,10 +15,12 @@ node scripts/skillhub-publish.mjs validate /绝对路径/skill-dir
 node scripts/skillhub-publish.mjs plan /绝对路径/skill-dir
 node scripts/skillhub-publish.mjs preflight
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --browser-id <browserId>
-node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --submit
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体"
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --update
+node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --fill-only
 ```
 
 `--display-name` 指浏览器环境显示名；表单名称和更新说明可分别用 `--skill-name`、`--changelog` 覆盖。
 
-默认停在提交前；`--submit` 才点击“提交审核”。遇到登录、实名、验证码、风控或平台拒绝会明确停下，不伪报成功。
+`publish` 默认点击“提交审核”或“更新 Skill”，并回到列表核对版本和审核状态。只有明确要先预览时才使用 `--fill-only` 停在提交前。遇到登录、实名、验证码、风控或平台拒绝会明确停下，不伪报成功。
 新开的 SkillHub 标签默认保留，便于检查填写结果；需要清理时追加 `--close-tab`，不会关闭用户原有标签。

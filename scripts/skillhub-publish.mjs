@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 const BRIDGE_URL = (process.env.EASY_WEBBRIDGE_URL || "http://127.0.0.1:17777").replace(/\/$/, "");
 const SKILLHUB_URL = process.env.SKILLHUB_PUBLISH_URL || "https://skillhub.cn/dashboard/publish";
 const SKILLHUB_DASHBOARD_URL = "https://skillhub.cn/dashboard";
-const DEFAULT_CHANGELOG = "首个公开版本：完善 SkillHub 发布流程，支持 Easy WebBridge 浏览器自动化。";
+const DEFAULT_CHANGELOG = "优化 SkillHub 自动发布流程、浏览器操作和结果回读。";
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
   ".git/*", ".factory/*", ".playwright-cli/*", "dist/*", "node_modules/*", "output/*", ".gitignore", ".DS_Store", "LICENSE",
@@ -38,7 +38,7 @@ function parseArgs(argv) {
       continue;
     }
     const key = item.slice(2).replaceAll("-", "_");
-    if (["submit", "close_tab", "update"].includes(key)) {
+    if (["submit", "fill_only", "close_tab", "update"].includes(key)) {
       flags[key] = true;
       continue;
     }
@@ -51,7 +51,12 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  process.stdout.write(`workbuddy SkillHub skill 自动发布\n\n用法：\n  node scripts/skillhub-publish.mjs validate <skill-dir>\n  node scripts/skillhub-publish.mjs plan <skill-dir>\n  node scripts/skillhub-publish.mjs package <skill-dir>\n  node scripts/skillhub-publish.mjs preflight\n  node scripts/skillhub-publish.mjs publish <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs publish <skill-dir> --display-name <name> [--update] [--submit] [--close-tab]\n  node scripts/skillhub-publish.mjs self-test\n\npublish 默认上传并填写，停在提交前；更新已有条目时加 --update，只有显式 --submit 才提交。\n`);
+  process.stdout.write(`workbuddy SkillHub skill 自动发布\n\n用法：\n  node scripts/skillhub-publish.mjs validate <skill-dir>\n  node scripts/skillhub-publish.mjs plan <skill-dir>\n  node scripts/skillhub-publish.mjs package <skill-dir>\n  node scripts/skillhub-publish.mjs preflight\n  node scripts/skillhub-publish.mjs publish <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs publish <skill-dir> --display-name <name> [--update] [--fill-only] [--close-tab]\n  node scripts/skillhub-publish.mjs self-test\n\npublish 默认完成上传、填表并点击提交；更新已有条目时加 --update。只有显式 --fill-only 才停在提交前。\n`);
+}
+
+function shouldSubmit(flags) {
+  if (flags.submit && flags.fill_only) fail("invalid-args", "--submit 和 --fill-only 不能同时使用");
+  return !flags.fill_only;
 }
 
 function scalar(value) {
@@ -470,6 +475,7 @@ async function publishSkill(inputDir, flags) {
   const runtime = await preflight();
   const browser = chooseBrowser(runtime.browsers, flags);
   const updateMode = Boolean(flags.update);
+  const submitNow = shouldSubmit(flags);
   const opened = await findOrOpenSkillhubTab(browser.browserId, updateMode ? SKILLHUB_DASHBOARD_URL : SKILLHUB_URL);
   const { browserId, displayName } = browser;
   try {
@@ -514,7 +520,7 @@ async function publishSkill(inputDir, flags) {
     snapshot = await takeSnapshot(browserId, opened.tabId);
     const result = {
       ok: true,
-      status: flags.submit ? "submitting" : "awaiting_confirmation",
+      status: submitNow ? "submitting" : "awaiting_confirmation",
       skill: packaged.slug,
       displayName: displayNameValue,
       version: packaged.version,
@@ -525,9 +531,9 @@ async function publishSkill(inputDir, flags) {
       icon: { path: packaged.iconPath, url: iconUrl },
       fieldsFilled: fields.map(([selector]) => selector),
       mode: updateMode ? "update" : "create",
-      submitRequired: !Boolean(flags.submit),
+      submitRequired: !submitNow,
     };
-    if (!flags.submit) {
+    if (!submitNow) {
       print(result);
       return;
     }
@@ -575,7 +581,7 @@ async function commandMain(command, positional, flags) {
   }
   if (command === "plan") {
     const checked = await validateSkill(dir);
-    return print({ ok: true, status: "validated", skill: checked.slug, version: checked.version, steps: ["校验 SKILL.md、manifest.yaml、LICENSE 和 512×512 PNG 图标", "生成不含 .git、dist、过程目录和凭据的 ZIP", "复用已登录 SkillHub 浏览器上传 ZIP、图标并填写表单", "默认停在提交前；显式 --submit 才提交审核"], warnings: checked.warnings });
+    return print({ ok: true, status: "validated", skill: checked.slug, version: checked.version, steps: ["校验 SKILL.md、manifest.yaml、LICENSE 和 512×512 PNG 图标", "生成不含 .git、dist、过程目录和凭据的 ZIP", "复用已登录 SkillHub 浏览器上传 ZIP、图标并填写表单", "默认点击提交并回读平台状态；显式 --fill-only 才停在提交前"], warnings: checked.warnings });
   }
   if (command === "package") {
     const packaged = await packageSkill(dir);
@@ -586,6 +592,8 @@ async function commandMain(command, positional, flags) {
 }
 
 async function selfTest() {
+  if (!shouldSubmit({})) fail("self-test-failed", "publish 应默认提交");
+  if (shouldSubmit({ fill_only: true })) fail("self-test-failed", "--fill-only 应停在提交前");
   const dir = join(tmpdir(), `easy-skillhub-self-test-${Date.now()}`);
   await mkdir(join(dir, "assets"), { recursive: true });
   await mkdir(join(dir, ".factory"), { recursive: true });
@@ -615,7 +623,7 @@ async function selfTest() {
     const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry.startsWith(".playwright-cli/") || entry.startsWith("output/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.endsWith("/icon-source.svg") || entry === "icon-source.svg" || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
-    print({ ok: true, status: "passed", tests: ["manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
+    print({ ok: true, status: "passed", tests: ["publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
