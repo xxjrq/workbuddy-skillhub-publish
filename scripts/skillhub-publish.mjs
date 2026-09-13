@@ -12,7 +12,7 @@ const SKILLHUB_DASHBOARD_URL = "https://skillhub.cn/dashboard";
 const DEFAULT_CHANGELOG = "首个公开版本：完善 SkillHub 发布流程，支持 Easy WebBridge 浏览器自动化。";
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
-  ".git/*", ".factory/*", "dist/*", "node_modules/*", ".gitignore", ".DS_Store", "LICENSE",
+  ".git/*", ".factory/*", ".playwright-cli/*", "dist/*", "node_modules/*", "output/*", ".gitignore", ".DS_Store", "LICENSE",
   ".env", ".env.*", ".keep", "*/.keep", "*/__pycache__/*", "*.pyc", "*.pem", "*.key", "*.p12", "*.pfx",
 ];
 
@@ -546,7 +546,9 @@ async function selfTest() {
   const dir = join(tmpdir(), `easy-skillhub-self-test-${Date.now()}`);
   await mkdir(join(dir, "assets"), { recursive: true });
   await mkdir(join(dir, ".factory"), { recursive: true });
+  await mkdir(join(dir, ".playwright-cli"), { recursive: true });
   await mkdir(join(dir, "dist"), { recursive: true });
+  await mkdir(join(dir, "output"), { recursive: true });
   const png = Buffer.alloc(24);
   Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png, 0);
   png.write("IHDR", 12, "ascii");
@@ -560,11 +562,13 @@ async function selfTest() {
   await writeFile(join(dir, ".env"), "SHOULD_NOT_BE_PACKAGED=1\n");
   await writeFile(join(dir, "assets", ".keep"), "");
   await writeFile(join(dir, ".factory", "progress.json"), "{}\n");
+  await writeFile(join(dir, ".playwright-cli", "page.yml"), "debug\n");
   await writeFile(join(dir, "dist", "old.zip"), "old\n");
+  await writeFile(join(dir, "output", "result.json"), "{}\n");
   try {
     const checked = await validateSkill(dir);
     const packaged = await packageSkill(dir, checked);
-    const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
+    const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry.startsWith(".playwright-cli/") || entry.startsWith("output/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
     print({ ok: true, status: "passed", tests: ["manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
