@@ -465,7 +465,10 @@ async function publishSkill(inputDir, flags) {
       confirmation = snapshotText(after).replaceAll("图标审核中", "");
     }
     if (/需要完成实名认证/.test(confirmation)) fail("needs-user-action", "SkillHub 要求完成实名认证，请先完成认证");
-    if (/提交失败|不允许的文件类型/i.test(confirmation)) fail("needs-user-action", "SkillHub 返回提交失败，请检查页面提示");
+    if (/提交失败|不允许的文件类型/i.test(confirmation)) {
+      const detail = confirmation.split(/\r?\n/).map((line) => line.trim()).find((line) => /提交失败|不允许的文件类型/i.test(line));
+      fail("needs-user-action", `SkillHub 返回提交失败${detail ? `：${detail}` : "，请检查页面提示"}`);
+    }
     if (!/待审核|审核中|提交成功|under review|pending review/i.test(confirmation)) fail("uncertain", "已点击提交，但页面没有出现 SkillHub 确认文案");
     print({ ...result, status: /待审核|审核中|under review|pending review/i.test(confirmation) ? "under_review" : "submitted", submitRequired: false });
   } finally {
