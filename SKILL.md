@@ -43,7 +43,8 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 4. 复用已登录 SkillHub 标签，进入“发布 Skill · 最快上架”。
 5. 上传 ZIP 和 512px 图标，填写 slug、显示名称、中文简介、版本和更新说明。
 6. 重新读取页面确认上传状态。提交后只接受“提交成功 / 待审核 / 审核中”等平台文案，不能把点击结果当作成功。
-7. 输出脱敏回执：Skill、版本、浏览器、ZIP、图标 URL（如平台返回）和平台状态。
+7. 若平台没有弹出成功提示，则回到 Dashboard 核对 slug 和版本；目标版本已存在时返回 `already_current` 或 `listed`，不再重复上传。
+8. 输出脱敏回执：Skill、版本、浏览器、ZIP、图标 URL（如平台返回）和平台状态。
 
 ## 结果状态
 
@@ -51,6 +52,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 - `packaged`：ZIP 已生成并检查内容。
 - `awaiting_confirmation`：资料已填写，等待用户决定是否提交。
 - `submitted` / `审核中`：页面出现平台确认文案。
+- `already_current` / `listed`：Dashboard 已存在目标版本；无需重复提交，或提交后已回读到目标版本。
 - `needs_user_action`：登录、实名、验证码、风控、表单变化或平台拒绝，需要用户处理。
 - `failed`：本地校验、打包或网络命令失败，可修复后重试。
 

@@ -350,7 +350,9 @@ async function verifyPublishFields(browserId, tabId, fields) {
 async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
   const tabs = await bridgeCommand(browserId, "list_tabs", {});
   const existing = Array.isArray(tabs)
-    ? tabs.find((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:[/?#]|$)/i.test(String(tab.url || "")))
+    ? tabs
+        .filter((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:[/?#]|$)/i.test(String(tab.url || "")))
+        .sort((left, right) => Number(right.id) - Number(left.id))[0]
     : null;
   if (existing?.id !== undefined) {
     const tabId = Number(existing.id);
@@ -365,7 +367,12 @@ async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
   return { tabId, created: true, session };
 }
 
-async function ensureUpdateForm(browserId, tabId, slug) {
+function dashboardHasVersion(text, slug, version) {
+  const start = String(text).indexOf(`slug: ${slug}`);
+  return start >= 0 && String(text).slice(start, start + 600).includes(`V ${version}`);
+}
+
+async function ensureUpdateForm(browserId, tabId, slug, targetVersion) {
   for (let page = 1; page <= 20; page += 1) {
     await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: `${SKILLHUB_DASHBOARD_URL}?page=${page}` } });
     const pageIndicator = new RegExp(`\\b${page}\\s*\\/\\s*\\d+\\b`);
@@ -379,15 +386,17 @@ async function ensureUpdateForm(browserId, tabId, slug) {
       fail("needs-user-action", "SkillHub 页面要求登录，请先在指定 EasyBR 环境登录");
     }
     if (!pageIndicator.test(text)) fail("needs-user-action", `SkillHub 第 ${page} 页加载超时，停止更新以免点错条目`);
-    const code = `(() => { const expected = ${JSON.stringify(`slug: ${slug}`)}; const slugNode = [...document.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === expected); const card = slugNode?.closest('a'); const update = card && [...card.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === '更新'); if (!update) return null; update.scrollIntoView({ block: 'center', inline: 'center' }); const rect = update.getBoundingClientRect(); return JSON.stringify({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }); })()`;
-    const pointText = await evaluate(browserId, tabId, code);
-    if (typeof pointText === "string" && pointText) {
-      const point = JSON.parse(pointText);
+    const code = `(() => { const expected = ${JSON.stringify(`slug: ${slug}`)}; const slugNode = [...document.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === expected); const card = slugNode?.closest('a'); const update = card && [...card.querySelectorAll('*')].find((item) => (item.textContent || '').trim() === '更新'); if (!card || !update) return null; const text = card.innerText || card.textContent || ''; const version = text.match(/\\bV\\s*(\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?)/i)?.[1] || null; const status = ['安全审核中', '待审核', '审核中', '已发布', '已下架'].find((item) => text.includes(item)) || null; const image = [...card.querySelectorAll('img')].find((item) => /^https?:\\/\\//i.test(item.currentSrc || item.src || '')); update.scrollIntoView({ block: 'center', inline: 'center' }); const rect = update.getBoundingClientRect(); return JSON.stringify({ version, status, iconUrl: image?.currentSrc || image?.src || null, point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } }); })()`;
+    const entryText = await evaluate(browserId, tabId, code);
+    if (typeof entryText === "string" && entryText) {
+      const entry = JSON.parse(entryText);
+      if (entry.version === targetVersion) return { alreadyCurrent: true, ...entry, page };
+      const point = entry.point;
       for (const type of ["mousePressed", "mouseReleased"]) {
         await bridgeCommand(browserId, "cdp", { tabId, method: "Input.dispatchMouseEvent", params: { type, x: point.x, y: point.y, button: "left", clickCount: 1 } });
       }
       const form = await waitSnapshot(browserId, tabId, (value) => /更新 Skill/.test(snapshotText(value)) && /上传新版本文件/.test(snapshotText(value)));
-      if (/更新 Skill/.test(snapshotText(form))) return form;
+      if (/更新 Skill/.test(snapshotText(form))) return { snapshot: form, existing: entry, page };
       fail("needs-user-action", `已找到 ${slug}，但更新表单没有打开`);
     }
     const hasNext = await evaluate(browserId, tabId, `(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim() === '下一页'); return Boolean(button && !button.disabled); })()`);
@@ -458,9 +467,27 @@ async function publishSkill(inputDir, flags) {
   const opened = await findOrOpenSkillhubTab(browser.browserId, updateMode ? SKILLHUB_DASHBOARD_URL : SKILLHUB_URL);
   const { browserId, displayName } = browser;
   try {
-    let snapshot = updateMode
-      ? await ensureUpdateForm(browserId, opened.tabId, packaged.slug)
-      : await ensurePublishForm(browserId, opened.tabId);
+    const updateState = updateMode ? await ensureUpdateForm(browserId, opened.tabId, packaged.slug, packaged.version) : null;
+    if (updateState?.alreadyCurrent) {
+      print({
+        ok: true,
+        status: "already_current",
+        skill: packaged.slug,
+        displayName: packaged.displayName,
+        version: packaged.version,
+        browserId,
+        browserName: displayName,
+        tabId: opened.tabId,
+        zip: { path: packaged.zipPath, bytes: packaged.zipBytes, sha256: packaged.sha256 },
+        icon: { path: packaged.iconPath, url: updateState.iconUrl || null },
+        fieldsFilled: [],
+        mode: "update",
+        platformStatus: updateState.status,
+        submitRequired: false,
+      });
+      return;
+    }
+    let snapshot = updateMode ? updateState.snapshot : await ensurePublishForm(browserId, opened.tabId);
     await bridgeCommand(browserId, "upload", { selector: 'input[type="file"][accept*=".zip"]', files: [packaged.zipPath], tabId: opened.tabId }, 60_000);
     const changelog = String(flags.changelog || DEFAULT_CHANGELOG);
     const displayNameValue = String(flags.skill_name || packaged.displayName);
@@ -499,12 +526,20 @@ async function publishSkill(inputDir, flags) {
       return;
     }
     await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"]);
-    let after = await waitSnapshot(browserId, opened.tabId, (value) => /确认发布|待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
+    let after = await waitSnapshot(browserId, opened.tabId, (value) => {
+      const text = snapshotText(value);
+      return /确认发布|待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|版本\s+[^\n]+已存在|under review|pending review/i.test(text)
+        || (updateMode && dashboardHasVersion(text, packaged.slug, packaged.version));
+    }, 30_000);
     let confirmation = snapshotText(after).replaceAll("图标审核中", "");
     if (/确认发布/.test(confirmation) && /同名 slug|命名空间/.test(confirmation)) {
       await clickLabel(browserId, opened.tabId, after, ["确认发布"]);
       after = await waitSnapshot(browserId, opened.tabId, (value) => /待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
       confirmation = snapshotText(after).replaceAll("图标审核中", "");
+    }
+    if (updateMode && dashboardHasVersion(confirmation, packaged.slug, packaged.version)) {
+      print({ ...result, status: /待审核|审核中/.test(confirmation) ? "under_review" : "listed", platformStatus: /待审核|审核中/.test(confirmation) ? "审核中" : "已发布", submitRequired: false });
+      return;
     }
     if (/需要完成实名认证/.test(confirmation)) fail("needs-user-action", "SkillHub 要求完成实名认证，请先完成认证");
     if (/提交失败|更新失败|不允许的文件类型/i.test(confirmation)) {
