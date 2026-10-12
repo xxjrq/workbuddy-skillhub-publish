@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -12,7 +12,7 @@ const SKILLHUB_DASHBOARD_URL = "https://skillhub.cn/dashboard";
 const DEFAULT_CHANGELOG = "优化 SkillHub 自动发布流程、浏览器操作和结果回读。";
 const REQUIRED_FILES = ["SKILL.md", "manifest.yaml", "LICENSE"];
 const ZIP_EXCLUDES = [
-  ".git/*", ".factory/*", ".playwright-cli/*", "dist/*", "node_modules/*", "output/*", ".gitignore", ".DS_Store", "LICENSE",
+  ".git/*", ".factory/*", ".playwright-cli/*", "dist/*", "node_modules/*", "output/*", ".gitignore", ".DS_Store", "LICENSE", "LICENSE-CONTENT",
   ".env", ".env.*", ".keep", "*/.keep", "icon-source.svg", "*/icon-source.svg", "*/__pycache__/*", "*.pyc", "*.pem", "*.key", "*.p12", "*.pfx",
 ];
 
@@ -272,19 +272,52 @@ function snapshotText(snapshot) {
   return String(snapshot?.text || "");
 }
 
-function findInteractive(snapshot, labels, { partial = false } = {}) {
+function findInteractive(snapshot, labels, { partial = false, role = null } = {}) {
   const expected = labels.map((item) => String(item));
   return (snapshot?.interactive || []).find((item) => {
-    if (item.visible === false) return false;
+    if (item.visible === false || item.disabled === true || (role && item.role !== role)) return false;
     const text = String(item.text || "").trim();
     return expected.some((label) => partial ? text.includes(label) : text === label);
   }) || null;
 }
 
+function requireUniqueInteractive(snapshot, labels, options = {}) {
+  const expected = labels.map((item) => String(item));
+  const matches = (snapshot?.interactive || []).filter((item) => {
+    if (item.visible === false || item.disabled === true || (options.role && item.role !== options.role)) return false;
+    const text = String(item.text || "").trim();
+    return expected.some((label) => options.partial ? text.includes(label) : text === label);
+  });
+  if (matches.length > 1) fail("needs-user-action", `页面按钮不唯一：${labels.join(" / ")}`);
+  return matches[0] || null;
+}
+
 async function clickLabel(browserId, tabId, snapshot, labels, options = {}) {
-  const element = findInteractive(snapshot, labels, options);
+  let element = options.unique ? requireUniqueInteractive(snapshot, labels, options) : findInteractive(snapshot, labels, options);
+  if (!element?.ref) {
+    // The current publish page uses a div-based layout rather than <form>.
+    // Its submit button is below the icon area and outside the viewport after
+    // icon upload. Discover the exact rendered control, scroll it into view,
+    // then obtain a fresh semantic reference; never click a hidden old ref.
+    const deadline = Date.now() + (options.readyTimeoutMs ?? 15_000);
+    let state = null;
+    do {
+      const stateText = await evaluate(browserId, tabId, `(() => { const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim(); const labels = ${JSON.stringify(labels)}.map(normalize); const partial = ${Boolean(options.partial)}; const role = ${JSON.stringify(options.role || null)}; const matches = [...document.querySelectorAll('button,[role="button"],[role="tab"]')].filter(item => { const style = getComputedStyle(item); const actualRole = item.getAttribute('role') || (item.tagName === 'BUTTON' ? 'button' : null); const text = normalize(item.innerText || item.textContent); return (!role || actualRole === role) && item.getClientRects().length && style.display !== 'none' && style.visibility !== 'hidden' && !item.closest('[hidden],[inert]') && labels.some(label => partial ? text.includes(label) : text === label); }); const element = matches.length === 1 ? matches[0] : null; const disabled = Boolean(element?.disabled || element?.getAttribute('aria-disabled') === 'true'); if (element && !disabled) element.scrollIntoView({block:'center',inline:'center',behavior:'instant'}); return JSON.stringify({count:matches.length,disabled}); })()`);
+      state = typeof stateText === "string" ? JSON.parse(stateText) : null;
+      if (state?.count > 1) fail("needs-user-action", `页面按钮不唯一：${labels.join(" / ")}`);
+      if (state?.count === 1 && !state.disabled) break;
+      if (Date.now() >= deadline) break;
+      await new Promise(resolveWait => setTimeout(resolveWait, 250));
+    } while (Date.now() <= deadline);
+    if (state?.count !== 1 || state.disabled) fail("needs-user-action", `页面未找到唯一可用按钮：${labels.join(" / ")}`);
+    const fresh = await bridgeCommand(browserId, "snapshot", {
+      tabId, visibility: "visible", roles: options.role ? [options.role] : ["button", "tab"], text: labels,
+      textMode: "matched", maxElements: 40, maxTextLength: 2_000,
+    });
+    element = options.unique ? requireUniqueInteractive(fresh, labels, options) : findInteractive(fresh, labels, options);
+  }
   if (!element?.ref) fail("needs-user-action", `页面未找到按钮：${labels.join(" / ")}`);
-  await bridgeCommand(browserId, "click", { selector: element.ref, tabId });
+  await bridgeCommand(browserId, "click", { selector: element.ref, tabId, ...(options.mode ? { mode: options.mode } : {}) });
 }
 
 async function trustedClickLabel(browserId, tabId, label) {
@@ -301,7 +334,7 @@ async function takeSnapshot(browserId, tabId) {
   let lastError = null;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
-      return await bridgeCommand(browserId, "snapshot", { tabId, maxTextLength: 24_000 });
+      return await bridgeCommand(browserId, "snapshot", { tabId, visibility: "visible", textMode: "page", maxElements: 200, maxTextLength: 24_000 });
     } catch (error) {
       lastError = error;
       if (!/frame with id .* removed|no such frame|target closed/i.test(String(error?.message || error))) throw error;
@@ -324,6 +357,24 @@ async function waitSnapshot(browserId, tabId, predicate, timeoutMs = 20_000) {
 
 async function evaluate(browserId, tabId, code) {
   return bridgeCommand(browserId, "evaluate", { tabId, code });
+}
+
+async function publishFailureDetails(browserId, tabId, snapshotTextValue) {
+  // SkillHub renders the toast title (for example, “提交失败”) separately
+  // from its description, which contains the API error code/message. Page
+  // snapshots may expose only the title, so inspect visible alert/toast
+  // containers and retain their complete text for diagnostics.
+  const rendered = await evaluate(browserId, tabId, `(() => {
+    const visible = element => { const style = getComputedStyle(element); return element.getClientRects().length > 0 && style.display !== 'none' && style.visibility !== 'hidden'; };
+    const candidates = [...document.querySelectorAll('[role="alert"],[data-sonner-toast],[data-radix-toast-root],[aria-live="assertive"],[aria-live="polite"]')].filter(visible);
+    const relevant = candidates.filter(element => /提交失败|更新失败|不允许的文件类型/i.test(element.innerText || element.textContent || ''));
+    return JSON.stringify(relevant.map(element => String(element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim()).filter(Boolean).slice(-5));
+  })()`);
+  let toastLines = [];
+  try { toastLines = JSON.parse(typeof rendered === "string" ? rendered : "[]"); } catch {}
+  const snapshotLines = String(snapshotTextValue || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const combined = [...toastLines, ...snapshotLines].filter((line, index, all) => all.indexOf(line) === index).join(" | ").slice(0, 2_000);
+  return combined || "页面未提供更具体的失败说明";
 }
 
 async function waitForFileInput(browserId, tabId, selector, timeoutMs = 15_000) {
@@ -353,27 +404,23 @@ async function verifyPublishFields(browserId, tabId, fields) {
 }
 
 async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
-  const tabs = await bridgeCommand(browserId, "list_tabs", {});
-  const candidates = Array.isArray(tabs)
-    ? tabs
-        .filter((tab) => typeof tab.id === "number" && /^https:\/\/(?:www\.)?skillhub\.cn\/dashboard(?:[/?#]|$)/i.test(String(tab.url || "")))
-        .sort((left, right) => Number(Boolean(right.active)) - Number(Boolean(left.active)) || Number(right.id) - Number(left.id))
-    : [];
-  for (const candidate of candidates) {
-    const tabId = Number(candidate.id);
-    try {
-      await bridgeCommand(browserId, "snapshot", { tabId, maxTextLength: 500 }, 5_000);
-      await bridgeCommand(browserId, "activate_tab", { tabId });
-      await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: targetUrl } }, 10_000);
-      return { tabId, created: false };
-    } catch {
-      // A stale tab must not block the whole batch. Try the next logged-in tab.
-    }
-  }
-  const session = `workbuddy-skillhub-${Date.now()}`;
-  const opened = await bridgeCommand(browserId, "navigate", { url: targetUrl, newTab: true, active: true, session, groupTitle: "workbuddy SkillHub" });
+  // Reuse the selected browser profile's login state, while owning our own
+  // tab and group. A user's dashboard or another publisher's form is never
+  // navigated, activated, or closed by this CLI.
+  const session = `workbuddy-skillhub-${randomUUID()}`;
+  const opened = await bridgeCommand(browserId, "navigate", { url: targetUrl, newTab: true, session, groupTitle: "workbuddy SkillHub" });
   const tabId = Number(opened.tabId ?? opened.id);
-  if (!Number.isInteger(tabId)) fail("bridge-error", "Easy WebBridge 没有返回新标签页 ID");
+  try {
+    if (!Number.isInteger(tabId)) fail("bridge-error", "Easy WebBridge 没有返回新标签页 ID");
+    // Chrome may not commit tab.url yet; ownership comes from the session-filtered tab ID.
+    const tabs = await bridgeCommand(browserId, "list_tabs", { session });
+    if (!Array.isArray(tabs) || !tabs.some(tab => Number(tab.id) === tabId)) {
+      fail("bridge-error", "Easy WebBridge 返回的标签不属于本次 SkillHub 任务组");
+    }
+  } catch (error) {
+    await bridgeCommand(browserId, "close_session", { session }).catch(() => undefined);
+    throw error;
+  }
   return { tabId, created: true, session };
 }
 
@@ -437,12 +484,19 @@ async function uploadIcon(browserId, tabId, iconPath, { replace = false } = {}) 
     const existingUrl = await waitIconUrl(browserId, tabId);
     if (existingUrl) return existingUrl;
   }
-  const custom = findInteractive(snapshot, ["自定义"]);
-  if (custom) await trustedClickLabel(browserId, tabId, "自定义");
-  snapshot = await waitSnapshot(browserId, tabId, (value) => /点击上传图片|重新上传/.test(snapshotText(value)));
-  const uploadControl = findInteractive(snapshot, ["点击上传图片", "重新上传"]);
-  if (!uploadControl?.ref) fail("needs-user-action", "页面未找到图标上传按钮");
-  await bridgeCommand(browserId, "click", { selector: uploadControl.ref, tabId });
+  // Radix tabs activate on pointer events; a DOM-only click may leave preset selected.
+  await clickLabel(browserId, tabId, snapshot, ["自定义"], { mode: "native", role: "tab" });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const selected = await evaluate(browserId, tabId, `Boolean([...document.querySelectorAll('[role="tab"]')].find(item => (item.textContent || "").trim() === "自定义" && item.getAttribute("aria-selected") === "true"))`);
+    if (selected) break;
+    if (attempt === 2) fail("needs-user-action", "SkillHub 自定义图标标签未激活");
+    await new Promise(resolveWait => setTimeout(resolveWait, 350));
+    await clickLabel(browserId, tabId, await takeSnapshot(browserId, tabId), ["自定义"], { mode: "native", role: "tab" });
+  }
+  snapshot = await takeSnapshot(browserId, tabId);
+  // ZIP also has a “重新上传（清空）” label; page-text substring matches
+  // cannot prove that the exact icon upload control is ready.
+  await clickLabel(browserId, tabId, snapshot, ["点击上传图片", "重新上传"]);
   const dialog = await waitSnapshot(browserId, tabId, (value) => /上传 Skill 图标|点击选择图片/.test(snapshotText(value)));
   if (!dialog || !/上传/.test(snapshotText(dialog))) fail("needs-user-action", "图标上传窗口未打开");
   const imageSelector = 'input[type="file"][accept*="image"]';
@@ -537,7 +591,7 @@ async function publishSkill(inputDir, flags) {
       print(result);
       return;
     }
-    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"]);
+    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"], { role: "button", unique: true, mode: "native" });
     let after = await waitSnapshot(browserId, opened.tabId, (value) => {
       const text = snapshotText(value);
       return /确认发布|待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|版本\s+[^\n]+已存在|under review|pending review/i.test(text)
@@ -555,15 +609,15 @@ async function publishSkill(inputDir, flags) {
     }
     if (/需要完成实名认证/.test(confirmation)) fail("needs-user-action", "SkillHub 要求完成实名认证，请先完成认证");
     if (/提交失败|更新失败|不允许的文件类型/i.test(confirmation)) {
-      const detail = confirmation.split(/\r?\n/).map((line) => line.trim()).find((line) => /提交失败|更新失败|不允许的文件类型/i.test(line));
-      fail("needs-user-action", `SkillHub 返回${updateMode ? "更新" : "提交"}失败${detail ? `：${detail}` : "，请检查页面提示"}`);
+      const detail = await publishFailureDetails(browserId, opened.tabId, confirmation);
+      fail("needs-user-action", `SkillHub 返回${updateMode ? "更新" : "提交"}失败：${detail}`);
     }
     if (!/待审核|审核中|提交成功|更新成功|under review|pending review/i.test(confirmation)) fail("uncertain", `已点击${updateMode ? "更新" : "提交"}，但页面没有出现 SkillHub 确认文案`);
     print({ ...result, status: /待审核|审核中|under review|pending review/i.test(confirmation) ? "under_review" : "submitted", submitRequired: false });
   } finally {
-    // Existing user tabs are borrowed and never closed. A newly opened tab is
-    // left visible so a person can inspect the filled form or platform receipt.
-    if (opened.created && flags.close_tab && opened.session) {
+    // Only explicit fill-only previews keep their owned tab open. Normal
+    // publishing cleans up its own group on success or failure.
+    if (opened.session && (flags.close_tab || !flags.fill_only)) {
       await bridgeCommand(browserId, "close_session", { session: opened.session }).catch(() => undefined);
     }
   }
@@ -608,6 +662,7 @@ async function selfTest() {
   await writeFile(join(dir, "SKILL.md"), "---\nname: demo-skill\ndescription: A demo skill for self test.\n---\n\n# Demo\n");
   await writeFile(join(dir, "manifest.yaml"), "name: demo-skill\ndisplay_name: Demo Skill\nslug: demo-skill\nversion: 1.2.3\ndescription: Demo Skill\nicon: assets/icon-512.png\nlicense: MIT\n");
   await writeFile(join(dir, "LICENSE"), "MIT\n");
+  await writeFile(join(dir, "LICENSE-CONTENT"), "Third-party content terms\n");
   await writeFile(join(dir, "assets", "icon-512.png"), png);
   await writeFile(join(dir, ".gitignore"), "dist/\n");
   await writeFile(join(dir, ".env"), "SHOULD_NOT_BE_PACKAGED=1\n");
@@ -623,9 +678,87 @@ async function selfTest() {
     const bad = packaged.entries.some((entry) => entry.startsWith(".git/") || entry.startsWith("dist/") || entry.startsWith(".factory/") || entry.startsWith(".playwright-cli/") || entry.startsWith("output/") || entry === ".gitignore" || entry === ".env" || entry.endsWith("/.keep") || entry.endsWith("/icon-source.svg") || entry === "icon-source.svg" || entry.includes("/__pycache__/") || entry.endsWith(".pyc"));
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
-    print({ ok: true, status: "passed", tests: ["publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files and LICENSE"], zipBytes: packaged.zipBytes });
+    if (packaged.entries.includes("LICENSE-CONTENT")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE-CONTENT");
+    await browserContractSelfTest();
+    print({ ok: true, status: "passed", tests: ["publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with native click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// Offline regression of the actual browser-command helpers. No live browser,
+// account, or platform write is involved in self-test.
+async function browserContractSelfTest() {
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.EASY_WEBBRIDGE_TOKEN;
+  const calls = [];
+  let scrolled = false;
+  let ambiguous = false;
+  let foreignTab = false;
+  let pendingUrl = false;
+  let lastNavigation = null;
+  const button = { innerText: "提交审核", textContent: "提交审核", tagName: "BUTTON", disabled: false,
+    getClientRects: () => [{}], closest: () => null, getAttribute: () => null,
+    scrollIntoView: () => { scrolled = true; },
+  };
+  process.env.EASY_WEBBRIDGE_TOKEN = "offline-self-test-token";
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).endsWith("/commands")) fail("self-test-failed", "离线测试不应访问真实网络");
+    const call = JSON.parse(init.body);
+    calls.push(call);
+    let result = {};
+    if (call.action === "navigate") { lastNavigation = call.args; result = { tabId: 88 }; }
+    else if (call.action === "list_tabs") result = [{ id: foreignTab ? 777 : 88, url: pendingUrl ? "" : lastNavigation.url }];
+    else if (call.action === "evaluate") {
+      const document = { querySelectorAll: () => ambiguous ? [button, button] : [button] };
+      result = new Function("document", "getComputedStyle", `return ${call.args.code}`)(document, () => ({ display: "block", visibility: "visible" }));
+    } else if (call.action === "snapshot") {
+      result = { text: "发布新技能", interactive: scrolled ? [{ ref: "@fresh-submit", text: "提交审核", role: "button", visible: true, disabled: button.disabled }] : [] };
+    }
+    return new Response(JSON.stringify({ ok: true, result }), { headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const first = await findOrOpenSkillhubTab("offline-test");
+    const second = await findOrOpenSkillhubTab("offline-test", SKILLHUB_DASHBOARD_URL);
+    if (first.session === second.session || calls.some(call => call.action === "activate_tab" || call.action === "cdp")) fail("self-test-failed", "发布器不得导航借用用户或其他任务标签");
+    if (calls.filter(call => call.action === "navigate").some(call => call.args.newTab !== true || !call.args.session)) fail("self-test-failed", "发布器必须创建独立任务组");
+    if (calls.filter(call => call.action === "list_tabs").some(call => !call.args.session)) fail("self-test-failed", "只能验证本次任务组标签");
+    pendingUrl = true;
+    const loadingOwned = await findOrOpenSkillhubTab("offline-test");
+    if (loadingOwned.tabId !== 88) fail("self-test-failed", "owned loading tab must be accepted before URL commits");
+    pendingUrl = false;
+    await takeSnapshot("offline-test", first.tabId);
+    const snapshotCall = calls.at(-1);
+    if (snapshotCall.args.textMode !== "page") fail("self-test-failed", "页面状态快照必须保留 page 文本");
+    await clickLabel("offline-test", first.tabId, { interactive: [{ ref: "@old-hidden", text: "提交审核", role: "button", visible: false }] }, ["提交审核"], { role: "button", unique: true, mode: "native" });
+    const submitClick = calls.at(-1);
+    const submitSnapshot = calls.slice(0, -1).reverse().find((call) => call.action === "snapshot");
+    if (!scrolled || submitClick.action !== "click" || submitClick.args.selector !== "@fresh-submit" || submitClick.args.mode !== "native" || JSON.stringify(submitSnapshot?.args.roles) !== JSON.stringify(["button"])) fail("self-test-failed", "离屏提交必须滚动后用新鲜、唯一的 role=button ref 执行 native click");
+    const countBeforeDuplicate = calls.filter((call) => call.action === "click").length;
+    let duplicateBlocked = false;
+    try {
+      await clickLabel("offline-test", first.tabId, { interactive: [
+        { ref: "@submit-one", text: "提交审核", role: "button", visible: true, disabled: false },
+        { ref: "@submit-two", text: "提交审核", role: "button", visible: true, disabled: false },
+      ] }, ["提交审核"], { role: "button", unique: true, mode: "native" });
+    } catch (error) { duplicateBlocked = error.code === "needs-user-action"; }
+    if (!duplicateBlocked || calls.filter((call) => call.action === "click").length !== countBeforeDuplicate) fail("self-test-failed", "重复提交按钮必须在点击前阻塞");
+    for (const mode of ["disabled", "ambiguous"]) {
+      scrolled = false; button.disabled = mode === "disabled"; ambiguous = mode === "ambiguous";
+      const count = calls.filter(call => call.action === "click").length;
+      let blocked = false;
+      try { await clickLabel("offline-test", first.tabId, { interactive: [] }, ["提交审核"], { readyTimeoutMs: 0, role: "button", unique: true, mode: "native" }); }
+      catch (error) { blocked = error.code === "needs-user-action"; }
+      if (!blocked || calls.filter(call => call.action === "click").length !== count) fail("self-test-failed", "禁用或歧义按钮不得点击");
+    }
+    foreignTab = true;
+    let rejected = false;
+    try { await findOrOpenSkillhubTab("offline-test"); } catch (error) { rejected = error.code === "bridge-error"; }
+    if (!rejected || calls.at(-1).action !== "close_session" || calls.at(-1).args.session !== lastNavigation.session) fail("self-test-failed", "错误标签必须阻塞并仅清理自己的组");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.EASY_WEBBRIDGE_TOKEN;
+    else process.env.EASY_WEBBRIDGE_TOKEN = originalToken;
   }
 }
 
