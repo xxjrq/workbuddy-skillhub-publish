@@ -387,6 +387,44 @@ async function waitForFileInput(browserId, tabId, selector, timeoutMs = 15_000) 
   fail("needs-user-action", `页面未生成文件选择框：${selector}`);
 }
 
+async function uploadZip(browserId, tabId, zipPath) {
+  try {
+    return await bridgeCommand(browserId, "upload", {
+      selector: 'input[type="file"][accept*=".zip"]', files: [zipPath], tabId,
+    }, 60_000);
+  } catch (error) {
+    // SkillHub clears the native input as soon as its React onChange handler
+    // has parsed the ZIP. Easy WebBridge then observes files.length === 0 and
+    // reports a selection mismatch even though the page already has the ZIP.
+    if (!/File selection changed: expected 1 files, selected 0/i.test(String(error?.message || error))) throw error;
+    const deadline = Date.now() + 20_000;
+    let accepted = false;
+    do {
+      const text = await evaluate(browserId, tabId, "document.body?.innerText || ''").catch(() => "");
+      if (/已选择\s+\d+\s+个文件/.test(String(text)) && /SKILL\.md/.test(String(text))) { accepted = true; break; }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+    } while (Date.now() < deadline);
+    if (!accepted) throw error;
+    return { acceptedByPage: true, selectionClearedAfterChange: true };
+  }
+}
+
+async function uploadImage(browserId, tabId, selector, imagePath) {
+  try {
+    return await bridgeCommand(browserId, "upload", { selector, files: [imagePath], tabId }, 60_000);
+  } catch (error) {
+    // The crop dialog reads the image and clears the input synchronously.
+    if (!/File selection changed: expected 1 files, selected 0/i.test(String(error?.message || error))) throw error;
+    const deadline = Date.now() + 15_000;
+    do {
+      const text = await evaluate(browserId, tabId, "document.body?.innerText || ''").catch(() => "");
+      if (/上传 Skill 图标|裁剪/.test(String(text))) return { acceptedByPage: true, selectionClearedAfterChange: true };
+      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+    } while (Date.now() < deadline);
+    throw error;
+  }
+}
+
 async function verifyPublishFields(browserId, tabId, fields) {
   const labels = {
     "#skill-slug": "Slug",
@@ -501,7 +539,7 @@ async function uploadIcon(browserId, tabId, iconPath, { replace = false } = {}) 
   if (!dialog || !/上传/.test(snapshotText(dialog))) fail("needs-user-action", "图标上传窗口未打开");
   const imageSelector = 'input[type="file"][accept*="image"]';
   await waitForFileInput(browserId, tabId, imageSelector);
-  await bridgeCommand(browserId, "upload", { selector: imageSelector, files: [iconPath], tabId }, 60_000);
+  await uploadImage(browserId, tabId, imageSelector, iconPath);
   const cropReady = await waitSnapshot(browserId, tabId, (value) => Boolean(findInteractive(value, ["上传"])), 20_000);
   if (!cropReady) fail("needs-user-action", "SkillHub 未完成图标读取或裁剪");
   await clickLabel(browserId, tabId, cropReady, ["上传"]);
@@ -554,7 +592,7 @@ async function publishSkill(inputDir, flags) {
       return;
     }
     let snapshot = updateMode ? updateState.snapshot : await ensurePublishForm(browserId, opened.tabId);
-    await bridgeCommand(browserId, "upload", { selector: 'input[type="file"][accept*=".zip"]', files: [packaged.zipPath], tabId: opened.tabId }, 60_000);
+    await uploadZip(browserId, opened.tabId, packaged.zipPath);
     const changelog = String(flags.changelog || DEFAULT_CHANGELOG);
     const displayNameValue = String(flags.skill_name || packaged.displayName);
     const fields = [
