@@ -450,8 +450,11 @@ async function findOrOpenSkillhubTab(browserId, targetUrl = SKILLHUB_URL) {
   const tabId = Number(opened.tabId ?? opened.id);
   try {
     if (!Number.isInteger(tabId)) fail("bridge-error", "Easy WebBridge 没有返回新标签页 ID");
-    // Chrome may not commit tab.url yet; ownership comes from the session-filtered tab ID.
-    const tabs = await bridgeCommand(browserId, "list_tabs", { session });
+    // Some EasyBR WebBridge builds create and group the tab successfully but
+    // return an empty session-filtered list. Verify ownership by the exact ID
+    // returned from our newTab navigation instead of treating that index as
+    // authoritative.
+    const tabs = await bridgeCommand(browserId, "list_tabs");
     if (!Array.isArray(tabs) || !tabs.some(tab => Number(tab.id) === tabId)) {
       fail("bridge-error", "Easy WebBridge 返回的标签不属于本次 SkillHub 任务组");
     }
@@ -671,7 +674,9 @@ async function publishSkill(inputDir, flags) {
     // Only explicit fill-only previews keep their owned tab open. Normal
     // publishing cleans up its own group on success or failure.
     if (opened.session && (flags.close_tab || !flags.fill_only)) {
-      await bridgeCommand(browserId, "close_session", { session: opened.session }).catch(() => undefined);
+      // This publisher creates exactly one tab per run. Closing its returned
+      // tab ID remains reliable even when the browser's session index is stale.
+      await bridgeCommand(browserId, "close_tab", { tabId: opened.tabId }).catch(() => undefined);
     }
   }
 }
