@@ -490,8 +490,23 @@ async function ensureUpdateForm(browserId, tabId, slug, targetVersion) {
       for (const type of ["mousePressed", "mouseReleased"]) {
         await bridgeCommand(browserId, "cdp", { tabId, method: "Input.dispatchMouseEvent", params: { type, x: point.x, y: point.y, button: "left", clickCount: 1 } });
       }
-      const form = await waitSnapshot(browserId, tabId, (value) => /更新 Skill/.test(snapshotText(value)) && /上传新版本文件/.test(snapshotText(value)));
-      if (/更新 Skill/.test(snapshotText(form))) return { snapshot: form, existing: entry, page };
+      let form = await waitSnapshot(browserId, tabId, (value) => /更新 Skill/.test(snapshotText(value)) && /上传新版本文件/.test(snapshotText(value)), 8_000);
+      if (/更新 Skill/.test(snapshotText(form)) && /上传新版本文件/.test(snapshotText(form))) return { snapshot: form, existing: entry, page };
+      // The dashboard action is a span inside a card link. A native CDP click
+      // can occasionally be swallowed while the dashboard is still settling;
+      // inspect the live page first, then retry the same visible control once.
+      let bodyText = await evaluate(browserId, tabId, "document.body?.innerText || ''").catch(() => "");
+      if (/更新 Skill/.test(String(bodyText)) && /上传新版本文件/.test(String(bodyText))) {
+        form = await takeSnapshot(browserId, tabId);
+        return { snapshot: form, existing: entry, page };
+      }
+      await evaluate(browserId, tabId, `(() => { const expected = ${JSON.stringify(`slug: ${slug}`)}; const node = [...document.querySelectorAll('*')].find(item => (item.textContent || '').trim() === expected); const card = node?.closest('a'); const action = card && [...card.querySelectorAll('*')].find(item => (item.textContent || '').trim() === '更新'); if (!action) return false; action.click(); return true; })()`);
+      form = await waitSnapshot(browserId, tabId, (value) => /更新 Skill/.test(snapshotText(value)) && /上传新版本文件/.test(snapshotText(value)), 12_000);
+      bodyText = await evaluate(browserId, tabId, "document.body?.innerText || ''").catch(() => "");
+      if (/更新 Skill/.test(String(bodyText)) && /上传新版本文件/.test(String(bodyText))) {
+        form = await takeSnapshot(browserId, tabId);
+        return { snapshot: form, existing: entry, page };
+      }
       fail("needs-user-action", `已找到 ${slug}，但更新表单没有打开`);
     }
     const hasNext = await evaluate(browserId, tabId, `(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim() === '下一页'); return Boolean(button && !button.disabled); })()`);
