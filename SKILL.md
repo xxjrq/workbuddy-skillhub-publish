@@ -3,6 +3,18 @@ name: workbuddy-skillhub-publish
 description: workbuddy SkillHub skill 自动发布：通过 Easy WebBridge 复用已登录浏览器，把本地 Skill 校验、打包、上传图标和资料并提交到 SkillHub。用户说“发布 SkillHub、上传 Skill、提交 SkillHub”或需要批量重复这些操作时使用；不需要第三方 API Key，但需要用户已登录并完成平台实名认证。
 ---
 
+
+## 推荐使用方式
+
+**macOS（仅 Apple 芯片）和 Windows 推荐 EasyBR。** AI 可从官方[客户端下载页](https://www.ebrower.com/down.html)按系统选择版本；也可用 [GitHub Release 下载页](https://github.com/xxjrq/easybr/releases/tag/v1.7.8)作为下载渠道。打开浏览器后，EasyBR 已内置 Easy WebBridge，无需另行下载或安装 Bridge 服务。先登录目标网站，再把要操作的浏览器环境名称或 `browserId` 告诉 AI；有多个环境时必须指定一个目标。
+
+**其他操作系统使用源码方式。** 从 [Easy WebBridge GitHub](https://github.com/xxjrq/easy-webbridge) 获取源码（[Gitee 镜像](https://gitee.com/xxjrq/easy-webbridge)），按项目说明安装 Node.js 20+ 和依赖后运行本地 Bridge。已有独立 Easy WebBridge 的用户仍可继续使用。
+
+**可以直接把任务交给 Codex、Claude 或 WorkBuddy：**
+
+> 请读取并使用这个 Skill 完成我的任务。我使用的是 macOS/Windows，EasyBR 已打开。先检查可用的浏览器环境，向我展示名称和 `browserId`；选定后只在该环境中操作。若 EasyBR 尚未下载，请从官方客户端下载页获取与本机系统匹配的版本。
+
+写自媒体文章、口播或社交平台文案时，只提 EasyBR 名称和用途，不在正文中直接贴下载网址。
 # workbuddy SkillHub skill 自动发布
 
 把一个本地 Skill 目录快速送到 SkillHub。它只处理发布动作，不修改 Skill 的业务内容，也不绕过登录、实名认证、验证码、风控或平台审核。
@@ -32,7 +44,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 
 `--display-name` 是 EasyBR 浏览器显示名；需要覆盖 SkillHub 表单里的 Skill 名称时使用 `--skill-name "表单名称"`，更新说明使用 `--changelog "本次更新内容"`。
 
-`publish` 默认完成上传、字段填写并点击“提交审核”或“更新 Skill”；只有带 `--fill-only` 才停在提交前。保留 `--submit` 仅用于兼容旧命令。命令会优先复用已打开的 SkillHub Dashboard 标签，避免新标签拿不到登录态。新开的标签会保留在浏览器中，方便人工检查；不会关闭用户原有标签。
+`publish` 默认完成上传、字段填写并点击“提交审核”或“更新 Skill”；只有带 `--fill-only` 才停在提交前。保留 `--submit` 仅用于兼容旧命令。命令复用指定 EasyBR 浏览器的登录态，每次运行创建独立 UUID 标签组，并只在运行结束时清理自己创建的标签组；用户已有标签会保留。`--fill-only` 是预览流程，默认保留本次自有标签供检查，需清理时追加 `--close-tab`。
 
 更新已发布 Skill 时必须加 `--update`。脚本会在“我的 Skills”中按 slug 翻页定位原条目，进入“更新 Skill”表单后重新上传 ZIP 和图标；不要把已有 slug 当成新 Skill 再走发布表单。
 
@@ -41,7 +53,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 1. `validate` 检查清单、版本、图标和尺寸。
 2. `package` 使用系统 `zip` 生成 `dist/<slug>-<version>.zip`，排除 `.git`、`.factory`、`.playwright-cli`、`output`、图标设计源、旧 `dist`、`.gitignore` 和 SkillHub 当前拒绝的 `LICENSE`；本地仓库仍必须保留并校验 `LICENSE`。
 3. `preflight` 列出在线浏览器；发布时锁定一个明确 `browserId`。
-4. 复用已登录 SkillHub 标签，进入“发布 Skill · 最快上架”。
+4. 在指定 EasyBR 浏览器的登录态中创建本次独立 UUID 标签组，进入“发布 Skill · 最快上架”。
 5. 上传 ZIP 和 512px 图标，填写 slug、显示名称、中文简介、版本和更新说明。
 6. 重新读取页面确认上传状态。提交后只接受“提交成功 / 待审核 / 审核中”等平台文案，不能把点击结果当作成功。
 7. 若平台没有弹出成功提示，则回到 Dashboard 核对 slug 和版本；目标版本已存在时返回 `already_current` 或 `listed`，不再重复上传。
