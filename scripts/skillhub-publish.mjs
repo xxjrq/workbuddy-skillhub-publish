@@ -381,10 +381,21 @@ async function evaluate(browserId, tabId, code) {
 }
 
 async function assertSkillhubPage(browserId, tabId) {
-  let actualUrl;
-  try { actualUrl = await evaluate(browserId, tabId, "window.location.href"); } catch {
-    fail("needs-user-action", "无法核验当前页面地址，已停止 SkillHub 操作");
+  let actualUrl, lastError;
+  // Page.navigate may temporarily destroy the old execution context before
+  // SkillHub's new document is ready. Retry only this read-only URL probe;
+  // never proceed to upload or submit until a URL is positively verified.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      actualUrl = await evaluate(browserId, tabId, "window.location.href");
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 7) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    }
   }
+  if (lastError || typeof actualUrl !== "string") fail("needs-user-action", "无法核验当前页面地址，已停止 SkillHub 操作");
   try { validateSkillhubUrl(actualUrl); } catch {
     fail("needs-user-action", "当前页面已离开 https://skillhub.cn，已停止 SkillHub 操作");
   }
@@ -1042,7 +1053,7 @@ async function selfTest() {
     await securityContractSelfTest();
     await zipUploadContractSelfTest();
     await browserContractSelfTest();
-    print({ ok: true, status: "passed", tests: ["Bridge accepts only credential-free HTTP loopback and rejects remote URLs before token read", "Bridge fetch refuses redirects", "SkillHub submission URL is restricted to credential-free HTTPS skillhub.cn", "preflight returns validated URL and browsers, reports health failures, and rejects invalid URL before token read", "actual page URL is checked before upload and submit; offsite navigation stops actions", "publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
+    print({ ok: true, status: "passed", tests: ["Bridge accepts only credential-free HTTP loopback and rejects remote URLs before token read", "Bridge fetch refuses redirects", "SkillHub submission URL is restricted to credential-free HTTPS skillhub.cn", "preflight returns validated URL and browsers, reports health failures, and rejects invalid URL before token read", "actual page URL is checked before upload and submit; offsite navigation stops actions", "transient page-context failures get bounded read-only retries and remain fail-closed", "publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1067,6 +1078,7 @@ async function browserContractSelfTest() {
   let ambiguous = false;
   let foreignTab = false;
   let pendingUrl = false;
+  let transientUrlErrors = 0;
   let currentPageUrl = "https://skillhub.cn/dashboard/publish";
   let lastNavigation = null;
   const button = { innerText: "提交审核", textContent: "提交审核", tagName: "BUTTON", disabled: false,
@@ -1082,7 +1094,10 @@ async function browserContractSelfTest() {
     if (call.action === "navigate") { lastNavigation = call.args; result = { tabId: 88 }; }
     else if (call.action === "list_tabs") result = [{ id: foreignTab ? 777 : 88, url: pendingUrl ? "" : lastNavigation.url }];
     else if (call.action === "evaluate") {
-      if (call.args.code === "window.location.href") result = currentPageUrl;
+      if (call.args.code === "window.location.href" && transientUrlErrors > 0) {
+        transientUrlErrors -= 1;
+        return new Response(JSON.stringify({ ok: false, error: "execution context destroyed during navigation" }), { headers: { "Content-Type": "application/json" } });
+      } else if (call.args.code === "window.location.href") result = currentPageUrl;
       else {
         const document = { querySelectorAll: () => ambiguous ? [button, button] : [button] };
         result = new Function("document", "getComputedStyle", `return ${call.args.code}`)(document, () => ({ display: "block", visibility: "visible" }));
@@ -1102,6 +1117,19 @@ async function browserContractSelfTest() {
     const loadingOwned = await findOrOpenSkillhubTab("offline-test");
     if (loadingOwned.tabId !== 88) fail("self-test-failed", "owned loading tab must be accepted before URL commits");
     pendingUrl = false;
+    transientUrlErrors = 2;
+    const callsBeforeUrlRetry = calls.length;
+    await assertSkillhubPage("offline-test", first.tabId);
+    if (transientUrlErrors !== 0 || calls.length < callsBeforeUrlRetry + 3) fail("self-test-failed", "transient navigation read failures must retry the read-only URL check");
+    transientUrlErrors = 9;
+    const callsBeforeRetryLimit = calls.length;
+    let retryLimitStopped = false;
+    try { await assertSkillhubPage("offline-test", first.tabId); } catch (error) { retryLimitStopped = error.code === "needs-user-action"; }
+    const retryLimitCalls = calls.slice(callsBeforeRetryLimit);
+    if (!retryLimitStopped || transientUrlErrors !== 1 || retryLimitCalls.length !== 8
+        || retryLimitCalls.some(call => call.action === "upload" || call.action === "click")) {
+      fail("self-test-failed", "URL read retry limit must stop closed without uploading or clicking");
+    }
     await assertSkillhubPage("offline-test", first.tabId); // page ready
     await assertSkillhubPage("offline-test", first.tabId); // immediately before package upload
     currentPageUrl = "https://skillhub.cn.attacker.invalid/upload";
