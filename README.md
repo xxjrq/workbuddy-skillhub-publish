@@ -30,9 +30,11 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --browser-id <
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体"
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --update
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --fill-only
+node scripts/skillhub-publish.mjs readback /绝对路径/skill-dir --browser-id <browserId>
 ```
 
 `--display-name` 指浏览器环境显示名；表单名称和更新说明可分别用 `--skill-name`、`--changelog` 覆盖。
 
 `publish` 默认点击“提交审核”或“更新 Skill”，并回到列表核对版本和审核状态。只有明确要先预览时才使用 `--fill-only` 停在提交前。遇到登录、实名、验证码、风控或平台拒绝会明确停下，不伪报成功。
+`readback` 是只读核对命令；仅在确认所有分页已完整读取后才报告 `absent`，证据不足时返回 `unknown`。
 脚本复用指定 EasyBR 浏览器的登录态，每次运行创建独立 UUID 标签组，正常结束时只清理本次自有标签组并保留用户原有标签。`--fill-only` 预览默认保留本次标签供检查；需要清理时追加 `--close-tab`。

@@ -40,6 +40,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --browser-id <
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体"
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --update
 node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name "自媒体" --fill-only
+node scripts/skillhub-publish.mjs readback /绝对路径/skill-dir --browser-id <browserId>
 ```
 
 `--display-name` 是 EasyBR 浏览器显示名；需要覆盖 SkillHub 表单里的 Skill 名称时使用 `--skill-name "表单名称"`，更新说明使用 `--changelog "本次更新内容"`。
@@ -47,6 +48,7 @@ node scripts/skillhub-publish.mjs publish /绝对路径/skill-dir --display-name
 `publish` 默认完成上传、字段填写并点击“提交审核”或“更新 Skill”；只有带 `--fill-only` 才停在提交前。保留 `--submit` 仅用于兼容旧命令。命令复用指定 EasyBR 浏览器的登录态，每次运行创建独立 UUID 标签组，并只在运行结束时清理自己创建的标签组；用户已有标签会保留。`--fill-only` 是预览流程，默认保留本次自有标签供检查，需清理时追加 `--close-tab`。
 
 更新已发布 Skill 时必须加 `--update`。脚本会在“我的 Skills”中按 slug 翻页定位原条目，进入“更新 Skill”表单后重新上传 ZIP 和图标；不要把已有 slug 当成新 Skill 再走发布表单。
+`readback` 只读所选浏览器中的 SkillHub“我的 Skills”列表。只有列表页数、逐页顺序和下一页状态都核验完整且未找到 slug 时才返回 `absent`；页面未加载完、分页不清楚或条目状态不识别时返回 `unknown`。命令只关闭本次创建的标签组。
 
 ## 标准流程
 

@@ -51,7 +51,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  process.stdout.write(`workbuddy SkillHub skill 自动发布\n\n用法：\n  node scripts/skillhub-publish.mjs validate <skill-dir>\n  node scripts/skillhub-publish.mjs plan <skill-dir>\n  node scripts/skillhub-publish.mjs package <skill-dir>\n  node scripts/skillhub-publish.mjs preflight\n  node scripts/skillhub-publish.mjs publish <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs publish <skill-dir> --display-name <name> [--update] [--fill-only] [--close-tab]\n  node scripts/skillhub-publish.mjs self-test\n\npublish 默认完成上传、填表并点击提交；更新已有条目时加 --update。只有显式 --fill-only 才停在提交前。\n`);
+  process.stdout.write(`workbuddy SkillHub skill 自动发布\n\n用法：\n  node scripts/skillhub-publish.mjs validate <skill-dir>\n  node scripts/skillhub-publish.mjs plan <skill-dir>\n  node scripts/skillhub-publish.mjs package <skill-dir>\n  node scripts/skillhub-publish.mjs preflight\n  node scripts/skillhub-publish.mjs publish <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs publish <skill-dir> --display-name <name> [--update] [--fill-only] [--close-tab]\n  node scripts/skillhub-publish.mjs readback <skill-dir> --browser-id <id>\n  node scripts/skillhub-publish.mjs self-test\n\npublish 默认完成上传、填表并点击提交；更新已有条目时加 --update。只有显式 --fill-only 才停在提交前。\n`);
 }
 
 function shouldSubmit(flags) {
@@ -387,25 +387,44 @@ async function waitForFileInput(browserId, tabId, selector, timeoutMs = 15_000) 
   fail("needs-user-action", `页面未生成文件选择框：${selector}`);
 }
 
-async function uploadZip(browserId, tabId, zipPath) {
+export function zipUploadPageState(documentRef, expectedSlug, requiredFiles) {
+  const text = String(documentRef.body?.innerText || '');
+  const lines = text.split(/\r?\n/).map(line => line.trim());
+  const parsing = /正在解析文件/.test(text);
+  const failure = text.match(/[^\n]*(?:解析失败|解压失败|无法解析|ZIP\s*(?:文件)?格式错误|无效的\s*ZIP)[^\n]*/i)?.[0]?.trim() || null;
+  const fileCount = Number(text.match(/已选择\s+([1-9]\d*)\s+个文件/)?.[1] || 0);
+  const foundRequired = requiredFiles.filter(name => lines.some(line => line === name || (name === 'SKILL.md' && /^SKILL\.md\s*[（(]必需[）)]$/.test(line))));
+  const slugValue = String(documentRef.querySelector('#skill-slug')?.value || '').trim();
+  const slugMismatch = Boolean(expectedSlug && slugValue && slugValue !== expectedSlug);
+  const slugConfirmed = !expectedSlug || slugValue === expectedSlug;
+  return { ready: !parsing && !failure && slugConfirmed && !slugMismatch && fileCount >= requiredFiles.length && foundRequired.length === requiredFiles.length,
+    parsing, failure, fileCount, foundRequired, slugValue, slugConfirmed, slugMismatch };
+}
+
+async function uploadZip(browserId, tabId, zipPath, { expectedSlug, requiredFiles = ['SKILL.md','manifest.yaml'], timeoutMs = 90_000, pollMs = 300 } = {}) {
+  // The update dialog can appear before its asynchronously loaded file input.
+  const selector = 'input[type="file"][accept*=".zip"]';
+  await waitForFileInput(browserId, tabId, selector, 30_000);
   try {
-    return await bridgeCommand(browserId, "upload", {
-      selector: 'input[type="file"][accept*=".zip"]', files: [zipPath], tabId,
-    }, 60_000);
+    return await bridgeCommand(browserId, "upload", { selector, files: [zipPath], tabId }, 60_000);
   } catch (error) {
-    // SkillHub clears the native input as soon as its React onChange handler
-    // has parsed the ZIP. Easy WebBridge then observes files.length === 0 and
-    // reports a selection mismatch even though the page already has the ZIP.
-    if (!/File selection changed: expected 1 files, selected 0/i.test(String(error?.message || error))) throw error;
-    const deadline = Date.now() + 20_000;
-    let accepted = false;
+    // onChange clears the native input before asynchronous ZIP parsing finishes.
+    // A cleared input or spinner alone is not evidence the package was accepted.
+    if (!/^File selection changed:\s*expected\s+1\s+files,\s*selected\s+0$/i.test(String(error?.message || error).trim())) throw error;
+    const started = Date.now(), deadline = started + timeoutMs;
+    let state = null;
     do {
-      const text = await evaluate(browserId, tabId, "document.body?.innerText || ''").catch(() => "");
-      if (/已选择\s+\d+\s+个文件/.test(String(text)) && /SKILL\.md/.test(String(text))) { accepted = true; break; }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+      try {
+        const raw = await evaluate(browserId, tabId, `JSON.stringify((${zipUploadPageState.toString()})(document, ${JSON.stringify(expectedSlug || '')}, ${JSON.stringify(requiredFiles)}))`);
+        state = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      } catch { state = { unreadable: true }; }
+      if (state?.ready) return { acceptedByPage: true, selectionClearedAfterChange: true, parseEvidence: state };
+      if (state?.failure || state?.slugMismatch) break;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
     } while (Date.now() < deadline);
-    if (!accepted) throw error;
-    return { acceptedByPage: true, selectionClearedAfterChange: true };
+    error.details = { ...(error.details || {}), zipParseEvidence: state, zipParseElapsedMs: Date.now() - started, zipParseTimeoutMs: timeoutMs };
+    throw error;
   }
 }
 
@@ -610,7 +629,7 @@ async function publishSkill(inputDir, flags) {
       return;
     }
     let snapshot = updateMode ? updateState.snapshot : await ensurePublishForm(browserId, opened.tabId);
-    await uploadZip(browserId, opened.tabId, packaged.zipPath);
+    await uploadZip(browserId, opened.tabId, packaged.zipPath, { expectedSlug: packaged.slug, requiredFiles: ["SKILL.md", "manifest.yaml"] });
     const changelog = String(flags.changelog || DEFAULT_CHANGELOG);
     const displayNameValue = String(flags.skill_name || packaged.displayName);
     const fields = [
@@ -647,7 +666,7 @@ async function publishSkill(inputDir, flags) {
       print(result);
       return;
     }
-    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"], { role: "button", unique: true, mode: "native" });
+    await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"], { role: "button", unique: true, mode: "dom" });
     let after = await waitSnapshot(browserId, opened.tabId, (value) => {
       const text = snapshotText(value);
       return /确认发布|待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|版本\s+[^\n]+已存在|under review|pending review/i.test(text)
@@ -681,6 +700,109 @@ async function publishSkill(inputDir, flags) {
   }
 }
 
+// Read-only reconciliation of the selected SkillHub account's complete skill list.
+export function readDashboardCard(documentRef, slug) {
+  const exact = `slug: ${slug}`;
+  const candidates = new Map();
+  for (const node of [...documentRef.querySelectorAll('*')].filter(item => (item.textContent || '').trim() === exact)) {
+    let found = null;
+    for (let card = node; card && card !== documentRef.body; card = card.parentElement) {
+      const text = String(card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
+      const labels = text.match(/\bslug\s*:\s*[a-z0-9][a-z0-9-]*/gi) || [];
+      if (labels.length > 1) break;
+      const version = text.match(/\bV\s*(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)/i)?.[1] || null;
+      const status = ['安全审核中','待审核','审核中','已发布','已上架','已通过','已下架','已驳回','审核未通过'].find(value => text.includes(value)) || null;
+      // Slug text is often a small child node; ascend to its row before reading status/version.
+      if (labels.length === 1) {
+        found = {card, version, status};
+        if (version || status) break;
+      }
+    }
+    if (!found) continue;
+    let iconUrl = null, url = null;
+    for (let parent = found.card; parent && parent !== documentRef.body; parent = parent.parentElement) {
+      const text = String(parent.innerText || parent.textContent || '');
+      if ((text.match(/\bslug\s*:/gi) || []).length > 1) break;
+      const image = [...parent.querySelectorAll('img')].find(item => /^https?:\/\//.test(item.currentSrc || item.src || ''));
+      if (image) iconUrl = image.currentSrc || image.src;
+      const link = [...parent.querySelectorAll('a')].find(item => /\/skills\/[^/]+\//.test(item.href || ''));
+      if (link) url = link.href;
+    }
+    candidates.set(found.card, {version:found.version, status:found.status, iconUrl, url});
+  }
+  if (candidates.size > 1) throw new Error('SkillHub exact slug has multiple cards');
+  return [...candidates.values()][0] || null;
+}
+
+export function dashboardReadbackResult(slug, entry, scannedPages) {
+  const pages = Array.isArray(scannedPages) ? scannedPages : [];
+  const total = pages[0]?.totalPages;
+  const complete = Number.isSafeInteger(total) && total > 0 && pages.length === total
+    && pages.every((item, index) => item.page === index + 1 && item.totalPages === total
+      && item.hasNext === (index < total - 1));
+  if (entry) {
+    const status = entry.status === '已发布' || entry.status === '已上架' || entry.status === '已通过'
+      ? 'listed' : /审核/.test(entry.status || '') || entry.status === '待审核'
+        ? 'under_review' : ['已下架', '已驳回'].includes(entry.status) ? 'unlisted' : 'unknown';
+    return {ok:true,status,skill:slug,version:entry.version || null,
+      ...(entry.status ? {platformStatus:entry.status} : {}),icon:{url:entry.iconUrl || null},url:entry.url || SKILLHUB_DASHBOARD_URL,
+      ...(entry.url ? {owner:new URL(entry.url).pathname.split('/')[2]} : {}),
+      ...(status === 'unknown' ? {reason:'条目已找到，但页面状态无法确认'} : {})};
+  }
+  if (complete) return {ok:true,status:'absent',skill:slug,version:null};
+  return {ok:true,status:'unknown',skill:slug,version:null,reason:'未能确认已完整读取 SkillHub 全部列表页'};
+}
+
+async function cleanupOwnedSession(browserId, opened) {
+  const errors = [];
+  try { await bridgeCommand(browserId, 'close_tab', {tabId: opened.tabId}); } catch { errors.push('close_tab'); }
+  try { await bridgeCommand(browserId, 'close_session', {session: opened.session}); } catch { errors.push('close_session'); }
+  let remaining;
+  try {
+    const all = await bridgeCommand(browserId, 'list_tabs');
+    const own = await bridgeCommand(browserId, 'list_tabs', {session: opened.session});
+    if (!Array.isArray(all) || !Array.isArray(own)) fail('cleanup-pending', '无法确认本次任务页面已关闭');
+    remaining = all.filter(tab => Number(tab.id ?? tab.tabId) === opened.tabId || tab.session === opened.session).length + own.length;
+  } catch { fail('cleanup-pending', '关闭后回读标签列表失败'); }
+  if (remaining) fail('cleanup-pending', `本次任务仍有 ${remaining} 条页面记录，需要清理后回读`);
+  return {verified:true,remaining:0,...(errors.length ? {recovered:errors} : {})};
+}
+
+async function readbackSkill(inputDir, flags) {
+  const checked = await validateSkill(inputDir);
+  const browser = chooseBrowser((await preflight()).browsers, flags);
+  const opened = await findOrOpenSkillhubTab(browser.browserId, `${SKILLHUB_DASHBOARD_URL}?page=1`);
+  let result = {ok:true,status:'unknown',skill:checked.slug,version:null,reason:'尚未确认列表读取完整'};
+  const scannedPages = [];
+  try {
+    for (let page=1; page<=100; page++) {
+      if (page>1) {
+        const advanced = await evaluate(browser.browserId, opened.tabId, `(() => { const buttons = [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '下一页' && !b.disabled); if (buttons.length !== 1) return false; buttons[0].click(); return true; })()`);
+        if (advanced !== true) fail('needs-user-action', '无法可靠切换 SkillHub 后台分页');
+      }
+      const pageReady = snap => /管理你发布|我的\s*Skills|请先登录|立即登录/.test(snapshotText(snap))
+        && new RegExp('(?:\\b|第)'+page+'\\s*(?:\\/|页)').test(snapshotText(snap));
+      const snapshot = await waitSnapshot(browser.browserId, opened.tabId, pageReady);
+      if (!pageReady(snapshot)) break;
+      const raw = await evaluate(browser.browserId, opened.tabId, `(() => { const text=document.body?.innerText||''; const next=[...document.querySelectorAll('button')].find(item=>(item.textContent||'').trim()==='下一页'); const counter=text.match(/(?:第\\s*)?(\\d+)\\s*\\/\\s*(\\d+)|第\\s*(\\d+)\\s*页(?:\\s*共\\s*(\\d+)\\s*页)?/); const page=counter?Number(counter[1]||counter[3]):null; const totalPages=counter?(counter[2]||counter[4]?Number(counter[2]||counter[4]):null):null; return JSON.stringify({login:/请先登录|立即登录/.test(text)&&!/退出登录/.test(text),entry:(${readDashboardCard.toString()})(document,${JSON.stringify(checked.slug)}),hasNext:Boolean(next&&!next.disabled),page,totalPages}); })()`);
+      const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (data.login) fail('needs-user-action','请先在指定 Easy WebBridge 环境登录 SkillHub');
+      if (data.entry) {
+        result = dashboardReadbackResult(checked.slug, data.entry, []);
+        break;
+      }
+      if (data.page !== page || !Number.isSafeInteger(data.totalPages) || data.totalPages < page) break;
+      scannedPages.push({page,totalPages:data.totalPages,hasNext:data.hasNext});
+      if (!data.hasNext) break;
+      if (page === 100) fail('needs-user-action','后台分页超出回读上限');
+    }
+    if (result.status === 'unknown') result = dashboardReadbackResult(checked.slug, null, scannedPages);
+  } finally {
+    result.cleanup = await cleanupOwnedSession(browser.browserId, opened);
+  }
+  return print(result);
+}
+
 async function commandMain(command, positional, flags) {
   if (command === "help") return usage();
   if (command === "self-test") return selfTest();
@@ -700,7 +822,53 @@ async function commandMain(command, positional, flags) {
     return print({ ok: true, status: "packaged", skill: packaged.slug, version: packaged.version, zip: { path: packaged.zipPath, bytes: packaged.zipBytes, sha256: packaged.sha256 }, entries: packaged.entries });
   }
   if (command === "publish") return publishSkill(dir, flags);
+  if (command === "readback") return readbackSkill(dir, flags);
   fail("invalid-args", `未知命令：${command}`);
+}
+
+async function zipUploadContractSelfTest() {
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.EASY_WEBBRIDGE_TOKEN;
+  let inputReads = 0, uploadCalls = 0, parseReads = 0, rejectUpload = false;
+  process.env.EASY_WEBBRIDGE_TOKEN = 'offline-zip-self-test-token';
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).endsWith('/commands')) fail('self-test-failed', 'ZIP tests must not access a real service');
+    const call = JSON.parse(init.body);
+    let payload;
+    if (call.action === 'evaluate' && call.args.code.includes('document.querySelector') && call.args.code.includes('input[type') && call.args.code.includes('.zip')) {
+      inputReads += 1;
+      payload = {ok:true,result:inputReads > 1};
+    } else if (call.action === 'upload') {
+      uploadCalls += 1;
+      if (inputReads < 2) fail('self-test-failed', 'ZIP upload started before its asynchronously loaded input was ready');
+      payload = rejectUpload
+        ? {ok:false,error:'File selection changed: expected 1 files, selected 0'}
+        : {ok:true,result:{uploaded:true}};
+    } else if (call.action === 'evaluate') {
+      parseReads += 1;
+      payload = {ok:true,result:{ready:true,parsing:false,failure:null,slugMismatch:false,fileCount:3,foundRequired:['SKILL.md','manifest.yaml'],slugValue:'demo-skill'}};
+    } else fail('self-test-failed', `Unexpected ZIP-test command: ${call.action}`);
+    return new Response(JSON.stringify(payload), {headers:{'Content-Type':'application/json'}});
+  };
+  try {
+    const files = ['SKILL.md','manifest.yaml'];
+    const validDoc = {body:{innerText:'已选择 3 个文件\nSKILL.md\nmanifest.yaml'},querySelector:() => ({value:'demo-skill'})};
+    const validState = zipUploadPageState(validDoc,'demo-skill',files);
+    const parsingState = zipUploadPageState({body:{innerText:'正在解析文件\n已选择 3 个文件\nSKILL.md\nmanifest.yaml'},querySelector:() => ({value:'demo-skill'})},'demo-skill',files);
+    const emptySlugState = zipUploadPageState({body:{innerText:'已选择 3 个文件\nSKILL.md\nmanifest.yaml'},querySelector:() => ({value:''})},'demo-skill',files);
+    const wrongSlugState = zipUploadPageState({body:{innerText:'已选择 3 个文件\nSKILL.md\nmanifest.yaml'},querySelector:() => ({value:'other-skill'})},'demo-skill',files);
+    const failedState = zipUploadPageState({body:{innerText:'ZIP 解析失败\n已选择 3 个文件\nSKILL.md\nmanifest.yaml'},querySelector:() => ({value:'demo-skill'})},'demo-skill',files);
+    if (!validState.ready || parsingState.ready || emptySlugState.ready || emptySlugState.slugConfirmed || emptySlugState.slugMismatch || !wrongSlugState.slugMismatch || !failedState.failure) fail('self-test-failed','ZIP parse readiness must require completed parsing, matching slug, and required files');
+    const uploaded = await uploadZip('offline-zip-test', 1, '/tmp/demo.zip', {expectedSlug:'demo-skill',requiredFiles:files,timeoutMs:20,pollMs:1});
+    if (!uploaded.uploaded || inputReads < 2 || uploadCalls !== 1) fail('self-test-failed','ZIP input wait must finish before upload');
+    inputReads = 0; uploadCalls = 0; parseReads = 0; rejectUpload = true;
+    const reconciled = await uploadZip('offline-zip-test', 1, '/tmp/demo.zip', {expectedSlug:'demo-skill',requiredFiles:files,timeoutMs:20,pollMs:1});
+    if (!reconciled.acceptedByPage || !reconciled.parseEvidence?.ready || parseReads !== 1) fail('self-test-failed','cleared ZIP input is accepted only after page parse evidence');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.EASY_WEBBRIDGE_TOKEN;
+    else process.env.EASY_WEBBRIDGE_TOKEN = originalToken;
+  }
 }
 
 async function selfTest() {
@@ -737,8 +905,9 @@ async function selfTest() {
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
     if (packaged.entries.includes("LICENSE-CONTENT")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE-CONTENT");
+    await zipUploadContractSelfTest();
     await browserContractSelfTest();
-    print({ ok: true, status: "passed", tests: ["publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with native click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
+    print({ ok: true, status: "passed", tests: ["publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -747,6 +916,15 @@ async function selfTest() {
 // Offline regression of the actual browser-command helpers. No live browser,
 // account, or platform write is involved in self-test.
 async function browserContractSelfTest() {
+  const dashboardBody = {};
+  const row = {innerText:'Skill\nslug: demo-skill\nV 1.2.3\n已上架',textContent:'Skill\nslug: demo-skill\nV 1.2.3\n已上架',parentElement:dashboardBody,querySelectorAll:() => []};
+  const slugNode = {innerText:'slug: demo-skill',textContent:'slug: demo-skill',parentElement:row,querySelectorAll:() => []};
+  const card = readDashboardCard({body:dashboardBody,querySelectorAll:() => [slugNode]},'demo-skill');
+  if (card?.version !== '1.2.3' || card.status !== '已上架') fail('self-test-failed','readback must inspect the card ancestor of an exact slug node');
+  if (dashboardReadbackResult('demo-skill',{version:null,status:null},[]).status !== 'unknown') fail('self-test-failed','unrecognized card status must not be reported absent');
+  if (dashboardReadbackResult('demo-skill',null,[{page:1,totalPages:2,hasNext:true}]).status !== 'unknown') fail('self-test-failed','partial pagination must remain unknown');
+  if (dashboardReadbackResult('demo-skill',null,[{page:1,totalPages:2,hasNext:true},{page:2,totalPages:2,hasNext:false}]).status !== 'absent') fail('self-test-failed','absent requires verified complete pagination');
+  if (dashboardReadbackResult('demo-skill',null,[{page:1,totalPages:2,hasNext:true},{page:3,totalPages:2,hasNext:false}]).status !== 'unknown') fail('self-test-failed','skipped page must not establish absence');
   const originalFetch = globalThis.fetch;
   const originalToken = process.env.EASY_WEBBRIDGE_TOKEN;
   const calls = [];
@@ -780,7 +958,7 @@ async function browserContractSelfTest() {
     const second = await findOrOpenSkillhubTab("offline-test", SKILLHUB_DASHBOARD_URL);
     if (first.session === second.session || calls.some(call => call.action === "activate_tab" || call.action === "cdp")) fail("self-test-failed", "发布器不得导航借用用户或其他任务标签");
     if (calls.filter(call => call.action === "navigate").some(call => call.args.newTab !== true || !call.args.session)) fail("self-test-failed", "发布器必须创建独立任务组");
-    if (calls.filter(call => call.action === "list_tabs").some(call => !call.args.session)) fail("self-test-failed", "只能验证本次任务组标签");
+    if (!calls.some(call => call.action === "list_tabs")) fail("self-test-failed", "创建任务标签后必须回读验证返回的标签 ID");
     pendingUrl = true;
     const loadingOwned = await findOrOpenSkillhubTab("offline-test");
     if (loadingOwned.tabId !== 88) fail("self-test-failed", "owned loading tab must be accepted before URL commits");
@@ -788,24 +966,24 @@ async function browserContractSelfTest() {
     await takeSnapshot("offline-test", first.tabId);
     const snapshotCall = calls.at(-1);
     if (snapshotCall.args.textMode !== "page") fail("self-test-failed", "页面状态快照必须保留 page 文本");
-    await clickLabel("offline-test", first.tabId, { interactive: [{ ref: "@old-hidden", text: "提交审核", role: "button", visible: false }] }, ["提交审核"], { role: "button", unique: true, mode: "native" });
+    await clickLabel("offline-test", first.tabId, { interactive: [{ ref: "@old-hidden", text: "提交审核", role: "button", visible: false }] }, ["提交审核"], { role: "button", unique: true, mode: "dom" });
     const submitClick = calls.at(-1);
     const submitSnapshot = calls.slice(0, -1).reverse().find((call) => call.action === "snapshot");
-    if (!scrolled || submitClick.action !== "click" || submitClick.args.selector !== "@fresh-submit" || submitClick.args.mode !== "native" || JSON.stringify(submitSnapshot?.args.roles) !== JSON.stringify(["button"])) fail("self-test-failed", "离屏提交必须滚动后用新鲜、唯一的 role=button ref 执行 native click");
+    if (!scrolled || submitClick.action !== "click" || submitClick.args.selector !== "@fresh-submit" || submitClick.args.mode !== "dom" || JSON.stringify(submitSnapshot?.args.roles) !== JSON.stringify(["button"])) fail("self-test-failed", "离屏提交必须滚动后用新鲜、唯一的 role=button ref 执行一次 DOM-backed click");
     const countBeforeDuplicate = calls.filter((call) => call.action === "click").length;
     let duplicateBlocked = false;
     try {
       await clickLabel("offline-test", first.tabId, { interactive: [
         { ref: "@submit-one", text: "提交审核", role: "button", visible: true, disabled: false },
         { ref: "@submit-two", text: "提交审核", role: "button", visible: true, disabled: false },
-      ] }, ["提交审核"], { role: "button", unique: true, mode: "native" });
+      ] }, ["提交审核"], { role: "button", unique: true, mode: "dom" });
     } catch (error) { duplicateBlocked = error.code === "needs-user-action"; }
     if (!duplicateBlocked || calls.filter((call) => call.action === "click").length !== countBeforeDuplicate) fail("self-test-failed", "重复提交按钮必须在点击前阻塞");
     for (const mode of ["disabled", "ambiguous"]) {
       scrolled = false; button.disabled = mode === "disabled"; ambiguous = mode === "ambiguous";
       const count = calls.filter(call => call.action === "click").length;
       let blocked = false;
-      try { await clickLabel("offline-test", first.tabId, { interactive: [] }, ["提交审核"], { readyTimeoutMs: 0, role: "button", unique: true, mode: "native" }); }
+      try { await clickLabel("offline-test", first.tabId, { interactive: [] }, ["提交审核"], { readyTimeoutMs: 0, role: "button", unique: true, mode: "dom" }); }
       catch (error) { blocked = error.code === "needs-user-action"; }
       if (!blocked || calls.filter(call => call.action === "click").length !== count) fail("self-test-failed", "禁用或歧义按钮不得点击");
     }
