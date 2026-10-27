@@ -18,3 +18,4 @@ Use `validate`, `plan`, and `preflight` first. `publish` uploads the ZIP, icon, 
 Use `readback <skill-dir> --browser-id <id>` for a read-only listing check. It reports `absent` only after confirming every page was read in order; incomplete coverage or an unrecognized state returns `unknown`. It closes only the tab group created for that readback.
 
 The Bridge endpoint is restricted to credential-free HTTP loopback addresses, and Bridge requests do not follow redirects. `SKILLHUB_PUBLISH_URL` accepts only credential-free HTTPS pages on `skillhub.cn`.
+The publisher also checks the tab's actual URL when the page is ready, before file uploads, and before submission. It stops and cleans up its task tab group if navigation leaves `https://skillhub.cn`.

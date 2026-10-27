@@ -74,6 +74,7 @@ node scripts/skillhub-publish.mjs readback /绝对路径/skill-dir --browser-id 
 ## 安全边界
 
 - `EASY_WEBBRIDGE_URL` 只接受无凭据、无路径的 `http://127.0.0.1` 或 `http://[::1]` 地址；Bridge 请求不跟随重定向。`SKILLHUB_PUBLISH_URL` 只接受无凭据的 `https://skillhub.cn` 页面。
+- 发布过程中会读取任务页实际 URL；页面就绪、上传文件前和提交前只允许 `https://skillhub.cn`，检测到跳转到其他域名就停止并清理本任务标签组。
 - 不打印或保存 WebBridge Token、Cookie、实名资料和完整页面隐私内容。
 - 不绕过验证码、风控、实名认证或平台审核。
 - 不把“审核中”写成“审核通过”，不把“已上传”写成“已发布”。

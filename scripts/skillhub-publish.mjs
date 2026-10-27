@@ -380,6 +380,17 @@ async function evaluate(browserId, tabId, code) {
   return bridgeCommand(browserId, "evaluate", { tabId, code });
 }
 
+async function assertSkillhubPage(browserId, tabId) {
+  let actualUrl;
+  try { actualUrl = await evaluate(browserId, tabId, "window.location.href"); } catch {
+    fail("needs-user-action", "无法核验当前页面地址，已停止 SkillHub 操作");
+  }
+  try { validateSkillhubUrl(actualUrl); } catch {
+    fail("needs-user-action", "当前页面已离开 https://skillhub.cn，已停止 SkillHub 操作");
+  }
+  return actualUrl;
+}
+
 async function publishFailureDetails(browserId, tabId, snapshotTextValue) {
   // SkillHub renders the toast title (for example, “提交失败”) separately
   // from its description, which contains the API error code/message. Page
@@ -513,12 +524,14 @@ function dashboardHasVersion(text, slug, version) {
 async function ensureUpdateForm(browserId, tabId, slug, targetVersion) {
   for (let page = 1; page <= 20; page += 1) {
     await bridgeCommand(browserId, "cdp", { tabId, method: "Page.navigate", params: { url: `${SKILLHUB_DASHBOARD_URL}?page=${page}` } });
+    await assertSkillhubPage(browserId, tabId);
     const pageIndicator = new RegExp(`\\b${page}\\s*\\/\\s*\\d+\\b`);
     const snapshot = await waitSnapshot(browserId, tabId, (value) => {
       const text = snapshotText(value);
       return /请先登录|立即登录|login|sign in/i.test(text)
         || (/管理你发布的所有团队 Skills/.test(text) && pageIndicator.test(text) && (/slug:/.test(text) || /暂无已发布|暂无 Skill/.test(text)));
     });
+    await assertSkillhubPage(browserId, tabId);
     const text = snapshotText(snapshot);
     if (/请先登录|立即登录|login|sign in/i.test(text) && !/退出登录|logout/i.test(text)) {
       fail("needs-user-action", "SkillHub 页面要求登录，请先在指定 EasyBR 环境登录");
@@ -530,6 +543,7 @@ async function ensureUpdateForm(browserId, tabId, slug, targetVersion) {
       const entry = JSON.parse(entryText);
       if (entry.version === targetVersion) return { alreadyCurrent: true, ...entry, page };
       const point = entry.point;
+      await assertSkillhubPage(browserId, tabId);
       for (const type of ["mousePressed", "mouseReleased"]) {
         await bridgeCommand(browserId, "cdp", { tabId, method: "Input.dispatchMouseEvent", params: { type, x: point.x, y: point.y, button: "left", clickCount: 1 } });
       }
@@ -560,6 +574,7 @@ async function ensureUpdateForm(browserId, tabId, slug, targetVersion) {
 
 async function ensurePublishForm(browserId, tabId) {
   let snapshot = await waitSnapshot(browserId, tabId, (value) => /发布新技能|发布 Skill|最快上架|请先登录|立即登录|login|sign in/i.test(snapshotText(value)));
+  await assertSkillhubPage(browserId, tabId);
   const text = snapshotText(snapshot);
   if (/请先登录|立即登录|login|sign in/i.test(text) && !/退出登录|logout/i.test(text)) {
     fail("needs-user-action", "SkillHub 页面要求登录，请先在指定 EasyBR 环境登录");
@@ -567,12 +582,14 @@ async function ensurePublishForm(browserId, tabId) {
   if (!/发布新技能/.test(text)) {
     await clickLabel(browserId, tabId, snapshot, ["发布 Skill\n最快上架", "最快上架"], { partial: true });
     snapshot = await waitSnapshot(browserId, tabId, (value) => /发布新技能/.test(snapshotText(value)));
+    await assertSkillhubPage(browserId, tabId);
   }
   if (!/发布新技能/.test(snapshotText(snapshot))) fail("needs-user-action", "未进入 SkillHub 发布表单，请检查页面是否改版");
   return snapshot;
 }
 
 async function uploadIcon(browserId, tabId, iconPath, { replace = false } = {}) {
+  await assertSkillhubPage(browserId, tabId);
   let snapshot = await takeSnapshot(browserId, tabId);
   const currentText = snapshotText(snapshot);
   const previousUrl = replace ? await waitIconUrl(browserId, tabId, "", 2_000) : null;
@@ -597,6 +614,7 @@ async function uploadIcon(browserId, tabId, iconPath, { replace = false } = {}) 
   if (!dialog || !/上传/.test(snapshotText(dialog))) fail("needs-user-action", "图标上传窗口未打开");
   const imageSelector = 'input[type="file"][accept*="image"]';
   await waitForFileInput(browserId, tabId, imageSelector);
+  await assertSkillhubPage(browserId, tabId);
   await uploadImage(browserId, tabId, imageSelector, iconPath);
   const cropReady = await waitSnapshot(browserId, tabId, (value) => Boolean(findInteractive(value, ["上传"])), 20_000);
   if (!cropReady) fail("needs-user-action", "SkillHub 未完成图标读取或裁剪");
@@ -629,8 +647,10 @@ async function publishSkill(inputDir, flags) {
   const submitNow = shouldSubmit(flags);
   const opened = await findOrOpenSkillhubTab(browser.browserId, updateMode ? SKILLHUB_DASHBOARD_URL : publishUrl);
   const { browserId, displayName } = browser;
+  let failed = false;
   try {
     const updateState = updateMode ? await ensureUpdateForm(browserId, opened.tabId, packaged.slug, packaged.version) : null;
+    if (updateState) await assertSkillhubPage(browserId, opened.tabId);
     if (updateState?.alreadyCurrent) {
       print({
         ok: true,
@@ -651,6 +671,10 @@ async function publishSkill(inputDir, flags) {
       return;
     }
     let snapshot = updateMode ? updateState.snapshot : await ensurePublishForm(browserId, opened.tabId);
+    await assertSkillhubPage(browserId, opened.tabId);
+    // Recheck immediately before the first package upload in case navigation
+    // changed after the form became ready.
+    await assertSkillhubPage(browserId, opened.tabId);
     await uploadZip(browserId, opened.tabId, packaged.zipPath, { expectedSlug: packaged.slug, requiredFiles: ["SKILL.md", "manifest.yaml"] });
     const changelog = String(flags.changelog || DEFAULT_CHANGELOG);
     const displayNameValue = String(flags.skill_name || packaged.displayName);
@@ -665,7 +689,10 @@ async function publishSkill(inputDir, flags) {
       const currentSlug = await evaluate(browserId, opened.tabId, `(() => { const element = document.querySelector('#skill-slug'); return element && 'value' in element ? String(element.value || '') : null; })()`);
       if (currentSlug !== packaged.slug) fail("needs-user-action", `SkillHub 更新表单 slug 不一致：页面 ${currentSlug || "<空>"}，本地 ${packaged.slug}`);
     }
-    for (const [selector, value] of fields) await bridgeCommand(browserId, "fill", { selector, value, tabId: opened.tabId });
+    for (const [selector, value] of fields) {
+      await assertSkillhubPage(browserId, opened.tabId);
+      await bridgeCommand(browserId, "fill", { selector, value, tabId: opened.tabId });
+    }
     await verifyPublishFields(browserId, opened.tabId, fields);
     const iconUrl = await uploadIcon(browserId, opened.tabId, packaged.iconPath, { replace: updateMode });
     snapshot = await takeSnapshot(browserId, opened.tabId);
@@ -688,6 +715,7 @@ async function publishSkill(inputDir, flags) {
       print(result);
       return;
     }
+    await assertSkillhubPage(browserId, opened.tabId);
     await clickLabel(browserId, opened.tabId, snapshot, [updateMode ? "更新 Skill" : "提交审核"], { role: "button", unique: true, mode: "dom" });
     let after = await waitSnapshot(browserId, opened.tabId, (value) => {
       const text = snapshotText(value);
@@ -696,6 +724,7 @@ async function publishSkill(inputDir, flags) {
     }, 30_000);
     let confirmation = snapshotText(after).replaceAll("图标审核中", "");
     if (/确认发布/.test(confirmation) && /同名 slug|命名空间/.test(confirmation)) {
+      await assertSkillhubPage(browserId, opened.tabId);
       await clickLabel(browserId, opened.tabId, after, ["确认发布"]);
       after = await waitSnapshot(browserId, opened.tabId, (value) => /待审核|审核中|提交成功|更新成功|提交失败|更新失败|需要完成实名认证|不允许的文件类型|under review|pending review/i.test(snapshotText(value)), 30_000);
       confirmation = snapshotText(after).replaceAll("图标审核中", "");
@@ -711,13 +740,15 @@ async function publishSkill(inputDir, flags) {
     }
     if (!/待审核|审核中|提交成功|更新成功|under review|pending review/i.test(confirmation)) fail("uncertain", `已点击${updateMode ? "更新" : "提交"}，但页面没有出现 SkillHub 确认文案`);
     print({ ...result, status: /待审核|审核中|under review|pending review/i.test(confirmation) ? "under_review" : "submitted", submitRequired: false });
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    // Only explicit fill-only previews keep their owned tab open. Normal
-    // publishing cleans up its own group on success or failure.
-    if (opened.session && (flags.close_tab || !flags.fill_only)) {
-      // This publisher creates exactly one tab per run. Closing its returned
-      // tab ID remains reliable even when the browser's session index is stale.
+    // Explicit successful fill-only previews may keep their tab. Failures
+    // always clean their task-owned tab and group, even during a preview.
+    if (opened.session && (failed || flags.close_tab || !flags.fill_only)) {
       await bridgeCommand(browserId, "close_tab", { tabId: opened.tabId }).catch(() => undefined);
+      await bridgeCommand(browserId, "close_session", { session: opened.session }).catch(() => undefined);
     }
   }
 }
@@ -1011,7 +1042,7 @@ async function selfTest() {
     await securityContractSelfTest();
     await zipUploadContractSelfTest();
     await browserContractSelfTest();
-    print({ ok: true, status: "passed", tests: ["Bridge accepts only credential-free HTTP loopback and rejects remote URLs before token read", "Bridge fetch refuses redirects", "SkillHub submission URL is restricted to credential-free HTTPS skillhub.cn", "preflight returns validated URL and browsers, reports health failures, and rejects invalid URL before token read", "publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
+    print({ ok: true, status: "passed", tests: ["Bridge accepts only credential-free HTTP loopback and rejects remote URLs before token read", "Bridge fetch refuses redirects", "SkillHub submission URL is restricted to credential-free HTTPS skillhub.cn", "preflight returns validated URL and browsers, reports health failures, and rejects invalid URL before token read", "actual page URL is checked before upload and submit; offsite navigation stops actions", "publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1036,6 +1067,7 @@ async function browserContractSelfTest() {
   let ambiguous = false;
   let foreignTab = false;
   let pendingUrl = false;
+  let currentPageUrl = "https://skillhub.cn/dashboard/publish";
   let lastNavigation = null;
   const button = { innerText: "提交审核", textContent: "提交审核", tagName: "BUTTON", disabled: false,
     getClientRects: () => [{}], closest: () => null, getAttribute: () => null,
@@ -1050,8 +1082,11 @@ async function browserContractSelfTest() {
     if (call.action === "navigate") { lastNavigation = call.args; result = { tabId: 88 }; }
     else if (call.action === "list_tabs") result = [{ id: foreignTab ? 777 : 88, url: pendingUrl ? "" : lastNavigation.url }];
     else if (call.action === "evaluate") {
-      const document = { querySelectorAll: () => ambiguous ? [button, button] : [button] };
-      result = new Function("document", "getComputedStyle", `return ${call.args.code}`)(document, () => ({ display: "block", visibility: "visible" }));
+      if (call.args.code === "window.location.href") result = currentPageUrl;
+      else {
+        const document = { querySelectorAll: () => ambiguous ? [button, button] : [button] };
+        result = new Function("document", "getComputedStyle", `return ${call.args.code}`)(document, () => ({ display: "block", visibility: "visible" }));
+      }
     } else if (call.action === "snapshot") {
       result = { text: "发布新技能", interactive: scrolled ? [{ ref: "@fresh-submit", text: "提交审核", role: "button", visible: true, disabled: button.disabled }] : [] };
     }
@@ -1067,6 +1102,21 @@ async function browserContractSelfTest() {
     const loadingOwned = await findOrOpenSkillhubTab("offline-test");
     if (loadingOwned.tabId !== 88) fail("self-test-failed", "owned loading tab must be accepted before URL commits");
     pendingUrl = false;
+    await assertSkillhubPage("offline-test", first.tabId); // page ready
+    await assertSkillhubPage("offline-test", first.tabId); // immediately before package upload
+    currentPageUrl = "https://skillhub.cn.attacker.invalid/upload";
+    let offsiteBeforeUploadBlocked = false;
+    const actionsBeforeOffsiteGuard = calls.length;
+    try { await assertSkillhubPage("offline-test", first.tabId); } catch (error) { offsiteBeforeUploadBlocked = error.code === "needs-user-action"; }
+    if (!offsiteBeforeUploadBlocked || calls.slice(actionsBeforeOffsiteGuard).some(call => call.action === "upload" || call.action === "click")) fail("self-test-failed", "站外页面必须在上传前停止，不能上传文件或点击");
+    currentPageUrl = "https://skillhub.cn/dashboard/publish";
+    await assertSkillhubPage("offline-test", first.tabId); // immediately before submit
+    currentPageUrl = "https://attacker.invalid/submit";
+    let offsiteBeforeSubmitBlocked = false;
+    const actionsBeforeSubmitGuard = calls.length;
+    try { await assertSkillhubPage("offline-test", first.tabId); } catch (error) { offsiteBeforeSubmitBlocked = error.code === "needs-user-action"; }
+    if (!offsiteBeforeSubmitBlocked || calls.slice(actionsBeforeSubmitGuard).some(call => call.action === "click")) fail("self-test-failed", "提交前页面变为站外时必须停止，不得点击提交");
+    currentPageUrl = "https://skillhub.cn/dashboard/publish";
     await takeSnapshot("offline-test", first.tabId);
     const snapshotCall = calls.at(-1);
     if (snapshotCall.args.textMode !== "page") fail("self-test-failed", "页面状态快照必须保留 page 文本");

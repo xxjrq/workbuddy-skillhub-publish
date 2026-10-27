@@ -20,6 +20,7 @@
 - 已安装并运行 [Easy WebBridge](https://github.com/xxjrq/easy-webbridge)，备用地址：[Gitee](https://gitee.com/xxjrq/easy-webbridge)
 - SkillHub 已登录并完成实名认证的浏览器环境
 - Bridge 仅允许本机 loopback HTTP 地址；投稿目标仅允许 `https://skillhub.cn` 页面，Bridge 请求不跟随重定向。
+- 页面就绪、文件上传前和提交前都会核验实际域名；导航到其他站点时停止并清理本次任务标签组。
 
 ## 用法
 
