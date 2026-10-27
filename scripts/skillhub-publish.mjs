@@ -6,7 +6,6 @@ import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const BRIDGE_URL = (process.env.EASY_WEBBRIDGE_URL || "http://127.0.0.1:17777").replace(/\/$/, "");
 const SKILLHUB_URL = process.env.SKILLHUB_PUBLISH_URL || "https://skillhub.cn/dashboard/publish";
 const SKILLHUB_DASHBOARD_URL = "https://skillhub.cn/dashboard";
 const DEFAULT_CHANGELOG = "优化 SkillHub 自动发布流程、浏览器操作和结果回读。";
@@ -21,6 +20,26 @@ function fail(code, message, details = {}) {
   error.code = code;
   error.details = details;
   throw error;
+}
+
+export function validateBridgeUrl(value = process.env.EASY_WEBBRIDGE_URL || "http://127.0.0.1:17777") {
+  let url;
+  try { url = new URL(value); } catch { fail("invalid-bridge-url", "EASY_WEBBRIDGE_URL 必须是本机 Easy WebBridge 的 HTTP 地址"); }
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+  if (url.protocol !== "http:" || !loopback || url.username || url.password
+      || (url.pathname !== "" && url.pathname !== "/") || url.search || url.hash) {
+    fail("invalid-bridge-url", "EASY_WEBBRIDGE_URL 仅允许无凭据、无路径、无查询或片段的 http://127.0.0.1 或 http://[::1] 地址");
+  }
+  return url.origin;
+}
+
+export function validateSkillhubUrl(value = SKILLHUB_URL) {
+  let url;
+  try { url = new URL(value); } catch { fail("invalid-publish-url", "SKILLHUB_PUBLISH_URL 必须是 SkillHub 页面 HTTPS 地址"); }
+  if (url.protocol !== "https:" || url.hostname !== "skillhub.cn" || url.username || url.password || url.port) {
+    fail("invalid-publish-url", "SKILLHUB_PUBLISH_URL 仅允许无凭据的 https://skillhub.cn 页面");
+  }
+  return url.href;
 }
 
 function print(value) {
@@ -230,9 +249,10 @@ async function readBridgeToken() {
 }
 
 async function bridgeRequest(path, init = {}, { auth = true } = {}) {
+  const bridgeUrl = validateBridgeUrl();
   const headers = { Accept: "application/json", ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}), ...(init.headers || {}) };
   if (auth) headers.Authorization = `Bearer ${await readBridgeToken()}`;
-  const response = await fetch(`${BRIDGE_URL}${path}`, { ...init, headers });
+  const response = await fetch(`${bridgeUrl}${path}`, { ...init, headers, redirect: "error" });
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.ok === false) fail(response.status === 401 ? "needs-user-action" : "bridge-error", body.error || `Easy WebBridge HTTP ${response.status}`);
   return body;
@@ -247,8 +267,9 @@ async function bridgeCommand(browserId, action, args = {}, timeoutMs = 30_000) {
 }
 
 async function preflight() {
+  const bridgeUrl = validateBridgeUrl();
   const health = await bridgeRequest("/health", {}, { auth: false }).catch((error) => {
-    fail("needs-user-action", `Easy WebBridge 未运行：${BRIDGE_URL}`, { cause: error.message });
+    fail("needs-user-action", `Easy WebBridge 未运行：${bridgeUrl}`, { cause: error.message });
   });
   const response = await bridgeRequest("/v1/browsers");
   const browsers = (response.browsers || []).filter((item) => item.online !== false).map((item) => ({
@@ -256,7 +277,7 @@ async function preflight() {
     displayName: String(item.displayName || item.name || item.browserId || ""),
     platform: item.platform || null,
   }));
-  return { ok: true, runtime: { url: BRIDGE_URL, service: health.service || "easy-webbridge" }, browsers };
+  return { ok: true, runtime: { url: bridgeUrl, service: health.service || "easy-webbridge" }, browsers };
 }
 
 function chooseBrowser(browsers, flags) {
@@ -599,13 +620,14 @@ async function waitIconUrl(browserId, tabId, excludedUrl = "", timeoutMs = 20_00
 }
 
 async function publishSkill(inputDir, flags) {
+  const publishUrl = validateSkillhubUrl();
   const checked = await validateSkill(inputDir);
   const packaged = await packageSkill(inputDir, checked);
   const runtime = await preflight();
   const browser = chooseBrowser(runtime.browsers, flags);
   const updateMode = Boolean(flags.update);
   const submitNow = shouldSubmit(flags);
-  const opened = await findOrOpenSkillhubTab(browser.browserId, updateMode ? SKILLHUB_DASHBOARD_URL : SKILLHUB_URL);
+  const opened = await findOrOpenSkillhubTab(browser.browserId, updateMode ? SKILLHUB_DASHBOARD_URL : publishUrl);
   const { browserId, displayName } = browser;
   try {
     const updateState = updateMode ? await ensureUpdateForm(browserId, opened.tabId, packaged.slug, packaged.version) : null;
@@ -871,6 +893,87 @@ async function zipUploadContractSelfTest() {
   }
 }
 
+async function securityContractSelfTest() {
+  const originalFetch = globalThis.fetch;
+  const originalBridgeUrl = process.env.EASY_WEBBRIDGE_URL;
+  const originalToken = process.env.EASY_WEBBRIDGE_TOKEN;
+  const originalTokenFile = process.env.EASY_WEBBRIDGE_TOKEN_FILE;
+  let fetchCalls = 0;
+  try {
+    for (const value of ["https://127.0.0.1:17777", "http://example.com", "http://127.0.0.1:17777/api", "http://user:pass@127.0.0.1:17777", "http://127.0.0.1:17777/?x=1"]) {
+      let rejected = false;
+      try { validateBridgeUrl(value); } catch (error) { rejected = error.code === "invalid-bridge-url"; }
+      if (!rejected) fail("self-test-failed", `非法 Bridge 地址未被拒绝：${value}`);
+    }
+    if (validateBridgeUrl("http://127.0.0.1:17777") !== "http://127.0.0.1:17777"
+      || validateBridgeUrl("http://[::1]:17777/") !== "http://[::1]:17777") fail("self-test-failed", "合法 loopback Bridge 地址必须可用");
+
+    process.env.EASY_WEBBRIDGE_URL = "https://bridge.example.com";
+    delete process.env.EASY_WEBBRIDGE_TOKEN;
+    process.env.EASY_WEBBRIDGE_TOKEN_FILE = join(tmpdir(), `missing-bridge-token-${randomUUID()}`);
+    globalThis.fetch = async () => { fetchCalls += 1; throw new Error("remote request must not happen"); };
+    let rejectedBeforeTokenRead = false;
+    try { await bridgeRequest("/health"); } catch (error) { rejectedBeforeTokenRead = error.code === "invalid-bridge-url"; }
+    if (!rejectedBeforeTokenRead || fetchCalls !== 0) fail("self-test-failed", "远程 Bridge 必须在读取 token 和发出请求前拒绝");
+
+    for (const value of ["http://skillhub.cn/dashboard/publish", "https://skillhub.cn.example.com/publish", "https://user@skillhub.cn/publish", "https://skillhub.cn:8443/publish"]) {
+      let rejected = false;
+      try { validateSkillhubUrl(value); } catch (error) { rejected = error.code === "invalid-publish-url"; }
+      if (!rejected) fail("self-test-failed", `非法 SkillHub 投稿地址未被拒绝：${value}`);
+    }
+    if (validateSkillhubUrl("https://skillhub.cn/dashboard/publish") !== "https://skillhub.cn/dashboard/publish") fail("self-test-failed", "官方 SkillHub HTTPS 地址应被接受");
+
+    process.env.EASY_WEBBRIDGE_URL = "http://127.0.0.1:17777";
+    process.env.EASY_WEBBRIDGE_TOKEN = "offline-security-test-token";
+    globalThis.fetch = async (url, init) => {
+      fetchCalls += 1;
+      if (String(url) !== "http://127.0.0.1:17777/health" || init.redirect !== "error") fail("self-test-failed", "Bridge 请求必须使用 loopback 且拒绝 HTTP 重定向");
+      return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+    };
+    await bridgeRequest("/health");
+    if (fetchCalls !== 1) fail("self-test-failed", "合法本机 Bridge 请求未执行");
+
+    fetchCalls = 0;
+    globalThis.fetch = async (url, init) => {
+      fetchCalls += 1;
+      if (init.redirect !== "error") fail("self-test-failed", "preflight 请求必须拒绝重定向");
+      if (String(url) === "http://127.0.0.1:17777/health") return new Response(JSON.stringify({ ok: true, service: "test-bridge" }), { headers: { "Content-Type": "application/json" } });
+      if (String(url) === "http://127.0.0.1:17777/v1/browsers") return new Response(JSON.stringify({ ok: true, browsers: [{ browserId: "test-browser", displayName: "Test", online: true }] }), { headers: { "Content-Type": "application/json" } });
+      fail("self-test-failed", `preflight 请求地址意外：${url}`);
+    };
+    const ready = await preflight();
+    if (ready.runtime.url !== "http://127.0.0.1:17777" || ready.runtime.service !== "test-bridge"
+      || ready.browsers.length !== 1 || ready.browsers[0].browserId !== "test-browser" || fetchCalls !== 2) {
+      fail("self-test-failed", "preflight 成功必须返回校验后的 Bridge URL 和在线浏览器");
+    }
+
+    fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response("unavailable", { status: 503 });
+    };
+    let healthFailure = null;
+    try { await preflight(); } catch (error) { healthFailure = error; }
+    if (healthFailure?.code !== "needs-user-action" || !healthFailure.message.includes("http://127.0.0.1:17777") || fetchCalls !== 1) {
+      fail("self-test-failed", "preflight 健康检查失败必须返回含本机地址的预期错误");
+    }
+
+    process.env.EASY_WEBBRIDGE_URL = "https://bridge.example.com";
+    delete process.env.EASY_WEBBRIDGE_TOKEN;
+    process.env.EASY_WEBBRIDGE_TOKEN_FILE = join(tmpdir(), `missing-preflight-token-${randomUUID()}`);
+    fetchCalls = 0;
+    globalThis.fetch = async () => { fetchCalls += 1; throw new Error("preflight must reject before fetch"); };
+    let preflightRejectedBeforeTokenRead = false;
+    try { await preflight(); } catch (error) { preflightRejectedBeforeTokenRead = error.code === "invalid-bridge-url"; }
+    if (!preflightRejectedBeforeTokenRead || fetchCalls !== 0) fail("self-test-failed", "非法地址的 preflight 必须在读取 token 前拒绝");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalBridgeUrl === undefined) delete process.env.EASY_WEBBRIDGE_URL; else process.env.EASY_WEBBRIDGE_URL = originalBridgeUrl;
+    if (originalToken === undefined) delete process.env.EASY_WEBBRIDGE_TOKEN; else process.env.EASY_WEBBRIDGE_TOKEN = originalToken;
+    if (originalTokenFile === undefined) delete process.env.EASY_WEBBRIDGE_TOKEN_FILE; else process.env.EASY_WEBBRIDGE_TOKEN_FILE = originalTokenFile;
+  }
+}
+
 async function selfTest() {
   if (!shouldSubmit({})) fail("self-test-failed", "publish 应默认提交");
   if (shouldSubmit({ fill_only: true })) fail("self-test-failed", "--fill-only 应停在提交前");
@@ -905,9 +1008,10 @@ async function selfTest() {
     if (bad) fail("self-test-failed", "zip 包含被排除的过程文件");
     if (packaged.entries.includes("LICENSE")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE");
     if (packaged.entries.includes("LICENSE-CONTENT")) fail("self-test-failed", "SkillHub 上传包不应包含 LICENSE-CONTENT");
+    await securityContractSelfTest();
     await zipUploadContractSelfTest();
     await browserContractSelfTest();
-    print({ ok: true, status: "passed", tests: ["publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
+    print({ ok: true, status: "passed", tests: ["Bridge accepts only credential-free HTTP loopback and rejects remote URLs before token read", "Bridge fetch refuses redirects", "SkillHub submission URL is restricted to credential-free HTTPS skillhub.cn", "preflight returns validated URL and browsers, reports health failures, and rejects invalid URL before token read", "publish submits by default", "--fill-only pauses before submit", "manifest and frontmatter", "512×512 PNG", "ZIP required entries", "ZIP excludes process files, LICENSE, and LICENSE-CONTENT", "delayed ZIP file input is awaited and accepted parse is verified", "readback inspects card ancestors and reports absent only after complete pagination", "owned sessions never borrow user tabs", "page text snapshots", "offscreen submit scrolls then uses a fresh unique role=button ref with one DOM-backed click", "disabled and ambiguous submit controls stop", "foreign tab result is rejected and cleaned up", "owned loading tab with uncommitted URL"], zipBytes: packaged.zipBytes });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

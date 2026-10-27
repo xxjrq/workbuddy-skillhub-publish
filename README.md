@@ -19,6 +19,7 @@
 - Node.js 20+
 - 已安装并运行 [Easy WebBridge](https://github.com/xxjrq/easy-webbridge)，备用地址：[Gitee](https://gitee.com/xxjrq/easy-webbridge)
 - SkillHub 已登录并完成实名认证的浏览器环境
+- Bridge 仅允许本机 loopback HTTP 地址；投稿目标仅允许 `https://skillhub.cn` 页面，Bridge 请求不跟随重定向。
 
 ## 用法
 
